@@ -71,18 +71,28 @@ const fileToBase64 = (file) =>
     r.readAsDataURL(file);
   });
 
-const fileToText = (file) =>
+const fileToText = (file, encoding = "ISO-8859-1") =>
   new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(r.result);
     r.onerror = () => rej(new Error("Falha ao ler arquivo"));
-    r.readAsText(file, "ISO-8859-1");
+    r.readAsText(file, encoding);
   });
+
+// Tenta UTF-8 primeiro; se produzir caracteres de substituição (U+FFFD) cai para ISO-8859-1
+async function fileToTextAuto(file) {
+  const utf8 = await fileToText(file, "UTF-8");
+  if (!utf8.includes("�")) return utf8.replace(/^﻿/, ""); // remove BOM se presente
+  return fileToText(file, "ISO-8859-1");
+}
 
 // ---------- Claude API (via proxy serverless) ----------
 // A chave da Anthropic NUNCA fica no frontend. Esta função chama /api/claude,
 // uma Serverless Function (Vercel) que injeta a ANTHROPIC_API_KEY no servidor.
-async function callClaude(content, maxTokens = 1500) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function callClaude(content, maxTokens = 1500, tentativa = 0) {
+  const MAX_TENTATIVAS = 4;
   const response = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,9 +102,21 @@ async function callClaude(content, maxTokens = 1500) {
   if (response.status === 401) {
     throw new Error("Sessão expirada. Faça login novamente.");
   }
+  // 429 (rate limit) e 529 (overloaded) são temporários — tenta de novo com backoff
+  if ((response.status === 429 || response.status === 529 || response.status === 503) && tentativa < MAX_TENTATIVAS) {
+    const espera = 1500 * Math.pow(2, tentativa); // 1.5s, 3s, 6s, 12s
+    await sleep(espera);
+    return callClaude(content, maxTokens, tentativa + 1);
+  }
   if (!response.ok) {
     let msg = `Erro ${response.status} ao chamar a API`;
-    try { const e = await response.json(); if (e.error) msg = e.error; } catch (_) {}
+    try {
+      const e = await response.json();
+      if (e.error) msg = e.error;
+    } catch (_) {}
+    if (response.status === 529 || /overloaded/i.test(msg)) {
+      msg = "A API da Anthropic está sobrecarregada no momento. Tente reenviar este arquivo em alguns instantes.";
+    }
     throw new Error(msg);
   }
   const data = await response.json();
@@ -191,51 +213,90 @@ function parseOFX(text, fileName) {
   return out;
 }
 
+// detecta se um texto parece um UUID/identificador (não é valor monetário)
+const pareceIdentificador = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(String(v).trim());
+
+// valor monetário "de verdade": só dígitos, ponto, vírgula, sinal e R$
+const ehValorMonetario = (v) => {
+  const s = String(v).replace(/[R$\s]/g, "").trim();
+  return /^-?[\d.,]+$/.test(s) && s.length > 0;
+};
+
 async function parseCSVExtrato(text, fileName) {
   const res = Papa.parse(text.trim(), { skipEmptyLines: true });
   const rows = res.data;
   if (!rows.length) return [];
-  // heurística de colunas
-  const sample = rows.slice(0, Math.min(rows.length, 15));
-  const nCols = Math.max(...sample.map((r) => r.length));
-  let dateCol = -1, valCol = -1;
-  for (let c = 0; c < nCols; c++) {
-    const vals = sample.map((r) => r[c] || "");
-    if (dateCol < 0 && vals.filter((v) => /\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/.test(v)).length >= sample.length / 2) dateCol = c;
+
+  const nCols = Math.max(...rows.map((r) => r.length));
+
+  // ---- 1) Tenta detectar colunas pelo CABEÇALHO (mais confiável) ----
+  const headerCells = rows[0].map((c) => norm(String(c)));
+  const temCabecalho = headerCells.some((c) => c === "DATA" || c.endsWith("DATA")) &&
+    headerCells.some((c) => c.startsWith("VALOR") || c.includes("VALOR"));
+
+  let dateCol = -1, valCol = -1, descCol = -1;
+
+  if (temCabecalho) {
+    dateCol = headerCells.findIndex((c) => c === "DATA" || c.includes("DATA"));
+    valCol = headerCells.findIndex((c) => c.startsWith("VALOR") || c === "VALOR (R$)" || c.includes("VALOR"));
+    descCol = headerCells.findIndex((c) => c.includes("DESCRICAO") || c.includes("HISTORICO") || c.includes("LANCAMENTO") || c.includes("DETALHE"));
+    // se não achou descrição nomeada, pega a coluna de texto mais longa que não seja data/valor/identificador
+    if (descCol < 0) {
+      const idCol = headerCells.findIndex((c) => c.includes("IDENTIFICADOR") || c === "ID");
+      descCol = [...Array(nCols).keys()]
+        .filter((c) => c !== dateCol && c !== valCol && c !== idCol)
+        .sort((a, b) => rows.slice(1, 15).reduce((s, r) => s + String(r[b] || "").length, 0) - rows.slice(1, 15).reduce((s, r) => s + String(r[a] || "").length, 0))[0] ?? -1;
+    }
   }
-  for (let c = nCols - 1; c >= 0; c--) {
-    if (c === dateCol) continue;
-    const vals = sample.map((r) => r[c] || "");
-    const numeric = vals.filter((v) => /-?[\d.,]+$/.test(String(v).replace(/[R$\s]/g, "")) && parseValor(v) !== 0);
-    if (numeric.length >= sample.length / 2) { valCol = c; break; }
-  }
+
+  // ---- 2) Sem cabeçalho útil: heurística por conteúdo (ignorando UUIDs) ----
   if (dateCol < 0 || valCol < 0) {
-    // fallback: pede ao Claude o mapeamento das colunas
+    const sample = rows.slice(0, Math.min(rows.length, 15));
+    dateCol = -1; valCol = -1;
+    for (let c = 0; c < nCols; c++) {
+      const vals = sample.map((r) => r[c] || "");
+      if (dateCol < 0 && vals.filter((v) => /\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/.test(v)).length >= sample.length / 2) dateCol = c;
+    }
+    for (let c = nCols - 1; c >= 0; c--) {
+      if (c === dateCol) continue;
+      const vals = sample.map((r) => r[c] || "");
+      // exclui colunas de identificador (UUID) e exige valor monetário de verdade
+      if (vals.some((v) => pareceIdentificador(v))) continue;
+      const numeric = vals.filter((v) => ehValorMonetario(v) && parseValor(v) !== 0);
+      if (numeric.length >= sample.length / 2) { valCol = c; break; }
+    }
+    if (descCol < 0) {
+      descCol = [...Array(nCols).keys()]
+        .filter((c) => c !== dateCol && c !== valCol)
+        .filter((c) => !sample.some((r) => pareceIdentificador(r[c])))
+        .sort((a, b) => sample.reduce((s, r) => s + String(r[b] || "").length, 0) - sample.reduce((s, r) => s + String(r[a] || "").length, 0))[0] ?? -1;
+    }
+  }
+
+  // ---- 3) Último recurso: pede o mapeamento ao Claude ----
+  if (dateCol < 0 || valCol < 0) {
     const head = rows.slice(0, 5).map((r) => r.join(" | ")).join("\n");
     const t = await callClaude(
-      [{ type: "text", text: `Estas são as primeiras linhas de um CSV de extrato bancário (colunas separadas por "|"):\n${head}\n\nResponda SOMENTE com JSON: {"data":indice,"descricao":indice,"valor":indice,"tem_cabecalho":true/false} usando índices de coluna começando em 0.` }],
+      [{ type: "text", text: `Estas são as primeiras linhas de um CSV de extrato bancário (colunas separadas por "|"):\n${head}\n\nResponda SOMENTE com JSON: {"data":indice,"descricao":indice,"valor":indice,"tem_cabecalho":true/false} usando índices de coluna começando em 0. A coluna "valor" deve ser a de valores monetários (com decimais), NUNCA a de identificador/UUID.` }],
       1000
     );
     const map = parseJSONLoose(t);
-    dateCol = map.data; valCol = map.valor;
-    const descCol = map.descricao;
-    const body = map.tem_cabecalho ? rows.slice(1) : rows;
-    return body
-      .map((r) => ({ id: uid(), data: parseDataBR(r[dateCol]), descricao: r[descCol] || "", valor: parseValor(r[valCol]), arquivo: fileName }))
-      .filter((t2) => t2.valor < 0)
-      .map((t2) => ({ ...t2, valor: Math.abs(t2.valor) }));
+    dateCol = map.data; valCol = map.valor; descCol = map.descricao;
   }
-  const descCol = [...Array(nCols).keys()]
-    .filter((c) => c !== dateCol && c !== valCol)
-    .sort((a, b) => {
-      const len = (c) => sample.reduce((s, r) => s + String(r[c] || "").length, 0);
-      return len(b) - len(a);
-    })[0];
-  const startRow = /\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/.test(rows[0][dateCol] || "") ? 0 : 1;
-  return rows
-    .slice(startRow)
-    .map((r) => ({ id: uid(), data: parseDataBR(r[dateCol]), descricao: r[descCol] || "", valor: parseValor(r[valCol]), arquivo: fileName }))
-    .filter((t) => t.valor < 0)
+
+  // detecta se a primeira linha é cabeçalho (não tem data válida na coluna de data)
+  const primeiraTemData = /\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/.test(String(rows[0][dateCol] || ""));
+  const body = primeiraTemData ? rows : rows.slice(1);
+
+  return body
+    .map((r) => ({
+      id: uid(),
+      data: parseDataBR(r[dateCol]),
+      descricao: String(r[descCol] ?? "").trim(),
+      valor: parseValor(r[valCol]),
+      arquivo: fileName,
+    }))
+    .filter((t) => t.valor < 0) // só saídas
     .map((t) => ({ ...t, valor: Math.abs(t.valor) }));
 }
 
@@ -552,9 +613,9 @@ export default function ConciliacaoFiscal({ onLogout }) {
           errs.push(`${f.name}: arquivo já importado anteriormente — ignorado`);
         } else {
           let extraidos = [];
-          if (/\.ofx$/i.test(f.name)) extraidos = parseOFX(await fileToText(f), f.name);
+          if (/\.ofx$/i.test(f.name)) extraidos = parseOFX(await fileToTextAuto(f), f.name);
           else if (/\.(xlsx|xls)$/i.test(f.name)) extraidos = await parseXLSXExtrato(f);
-          else if (/\.(csv|txt)$/i.test(f.name)) extraidos = await parseCSVExtrato(await fileToText(f), f.name);
+          else if (/\.(csv|txt)$/i.test(f.name)) extraidos = await parseCSVExtrato(await fileToTextAuto(f), f.name);
           else if (/\.pdf$/i.test(f.name)) extraidos = await extrairExtratoPDF(f);
           else throw new Error("Formato não suportado (use OFX, XLS/XLSX, CSV ou PDF)");
           const novos = [];
