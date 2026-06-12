@@ -510,6 +510,10 @@ export default function ConciliacaoFiscal({ onLogout }) {
   const [semNFInput, setSemNFInput] = useState({}); // paymentId -> texto digitado
   const [saida, setSaida] = useState(null); // { filename, content } fallback de exportação
   const [copiado, setCopiado] = useState(false);
+  const [modalFornecedorKey, setModalFornecedorKey] = useState(null);
+  const [modalGrupoSemNFKey, setModalGrupoSemNFKey] = useState(null);
+  const [modalManualSel, setModalManualSel] = useState({});
+  const [modalSemNFSel, setModalSemNFSel] = useState({});
   const [confirmClear, setConfirmClear] = useState(false);
   const confirmTimer = useRef(null);
   const saveTimer = useRef(null);
@@ -525,13 +529,16 @@ export default function ConciliacaoFiscal({ onLogout }) {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("conciliacao:v1");
-        if (r && r.value) {
-          const d = JSON.parse(r.value);
-          setInvoices(d.invoices || []);
-          setPayments(d.payments || []);
-          setLinks(d.links || []);
-          setSemNF(d.semNF || {});
+        const r = await fetch("/api/storage?key=conciliacao%3Av1", { credentials: "include" });
+        if (r.ok) {
+          const { value } = await r.json();
+          if (value) {
+            const d = JSON.parse(value);
+            setInvoices(d.invoices || []);
+            setPayments(d.payments || []);
+            setLinks(d.links || []);
+            setSemNF(d.semNF || {});
+          }
         }
       } catch (e) {
         /* primeira execução: sem dados salvos */
@@ -545,7 +552,12 @@ export default function ConciliacaoFiscal({ onLogout }) {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       try {
-        await window.storage.set("conciliacao:v1", JSON.stringify({ invoices, payments, links, semNF }));
+        await fetch("/api/storage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ key: "conciliacao:v1", value: JSON.stringify({ invoices, payments, links, semNF }) }),
+        });
       } catch (e) {
         console.error("Falha ao salvar", e);
       }
@@ -652,6 +664,11 @@ export default function ConciliacaoFiscal({ onLogout }) {
   }
   const desvincular = (linkId) => setLinks((prev) => prev.filter((l) => l.id !== linkId));
 
+  function vincularERemoverSemNF(payment, invoice) {
+    vincular(payment, invoice);
+    setSemNF((m) => { const n = { ...m }; delete n[payment.id]; return n; });
+  }
+
   // ---- export / import estado completo ----
   function exportarEstado() {
     const estado = { versao: 2, exportadoEm: new Date().toISOString(), invoices, payments, links, semNF };
@@ -688,7 +705,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
   async function limparTudo() {
     setInvoices([]); setPayments([]); setLinks([]);
     setManualSel({}); setSemNF({}); setSemNFInput({}); setErrors([]); setConfirmClear(false);
-    try { await window.storage.delete("conciliacao:v1"); } catch (e) { /* chave pode não existir */ }
+    try { await fetch("/api/storage?key=conciliacao%3Av1", { method: "DELETE", credentials: "include" }); } catch (e) { /* */ }
   }
 
   // ---- relatórios ----
@@ -723,6 +740,56 @@ export default function ConciliacaoFiscal({ onLogout }) {
     return { tNotas, tPagos, tSemNota, tPendente, tSemNFFlag };
   }, [invoices, payments, relatorioA, relatorioB]);
 
+  const relatorioFornecedores = useMemo(() => {
+    const grupos = {};
+    invoices.forEach((inv) => {
+      const key = inv.cnpj || norm(inv.fornecedor);
+      if (!grupos[key]) grupos[key] = { key, fornecedor: inv.fornecedor, cnpj: inv.cnpj, notas: [] };
+      grupos[key].notas.push(inv);
+    });
+    return Object.values(grupos).map((g) => {
+      const totalNotas = g.notas.reduce((s, n) => s + n.valor, 0);
+      const totalPago = g.notas.reduce((s, n) => s + (pagoPorNota[n.id] || 0), 0);
+      const pendente = Math.max(0, totalNotas - totalPago);
+      const status = totalPago <= 0.005 ? "Em aberto" : pendente <= 0.005 ? "Pago" : "Parcial";
+      return { ...g, totalNotas, totalPago, pendente, status };
+    }).sort((a, b) => b.pendente - a.pendente);
+  }, [invoices, pagoPorNota]);
+
+  const relatorioSemNFAgrupado = useMemo(() => {
+    const grupos = {};
+    Object.entries(semNF).forEach(([pid, { motivo }]) => {
+      const p = payments.find((x) => x.id === pid);
+      if (!p) return;
+      const key = (motivo || "").trim() || "(sem justificativa)";
+      if (!grupos[key]) grupos[key] = { motivo: key, pagamentos: [], ids: [] };
+      grupos[key].pagamentos.push(p);
+      grupos[key].ids.push(pid);
+    });
+    return Object.values(grupos)
+      .map((g) => ({ ...g, total: g.pagamentos.reduce((s, p) => s + p.valor, 0) }))
+      .sort((a, b) => b.total - a.total);
+  }, [semNF, payments]);
+
+  const modalFornecedor = useMemo(
+    () => (modalFornecedorKey ? relatorioFornecedores.find((g) => g.key === modalFornecedorKey) ?? null : null),
+    [modalFornecedorKey, relatorioFornecedores]
+  );
+
+  const modalGrupoSemNF = useMemo(
+    () => (modalGrupoSemNFKey ? relatorioSemNFAgrupado.find((g) => g.motivo === modalGrupoSemNFKey) ?? null : null),
+    [modalGrupoSemNFKey, relatorioSemNFAgrupado]
+  );
+
+  const pagamentosDisponiveis = useMemo(
+    () =>
+      payments.filter((p) => {
+        const alocado = links.filter((l) => l.paymentId === p.id).reduce((s, l) => s + l.valor, 0);
+        return p.valor - alocado > 0.005;
+      }),
+    [payments, links]
+  );
+
   const pendentesConciliar = payments.filter((p) => {
     if (semNF[p.id]) return false;
     const alocado = (linksPorPagamento[p.id] || []).reduce((s, l) => s + l.valor, 0);
@@ -735,6 +802,8 @@ export default function ConciliacaoFiscal({ onLogout }) {
     ["conciliar", `Conciliar (${pendentesConciliar.length})`],
     ["semNF", `Sem NF (${Object.keys(semNF).length})`],
     ["relatorios", "Relatórios"],
+    ["porFornecedor", `Por fornecedor (${relatorioFornecedores.length})`],
+    ["semNFAgrupado", `Sem NF agrupado (${relatorioSemNFAgrupado.length})`],
   ];
 
   const UploadBox = ({ accept, onFiles, title, hint }) => (
@@ -1198,12 +1267,307 @@ export default function ConciliacaoFiscal({ onLogout }) {
               </div>
             </div>
           )}
+
+          {/* ---- POR FORNECEDOR ---- */}
+          {tab === "porFornecedor" && (
+            <div className="space-y-4">
+              {relatorioFornecedores.length === 0 ? (
+                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                  Nenhuma nota importada ainda. Importe notas fiscais na aba Notas fiscais.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      ["Total em notas", relatorioFornecedores.reduce((s, g) => s + g.totalNotas, 0), C.ink],
+                      ["Total pago", relatorioFornecedores.reduce((s, g) => s + g.totalPago, 0), C.blue],
+                      ["Total pendente", relatorioFornecedores.reduce((s, g) => s + g.pendente, 0), C.red],
+                    ].map(([label, v, color]) => (
+                      <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                        <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
+                        <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color }}>{fmtBRL(v)}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                        <Th>Fornecedor</Th><Th>CNPJ</Th><Th right>Notas</Th><Th right>Valor total</Th><Th right>Pago</Th><Th right>Pendente</Th><Th>Status</Th><Th></Th>
+                      </tr></thead>
+                      <tbody>
+                        {relatorioFornecedores.map((g) => (
+                          <tr key={g.key} style={{ borderBottom: `1px solid ${C.line}` }}>
+                            <Td>{g.fornecedor}</Td>
+                            <Td mono>{g.cnpj || "—"}</Td>
+                            <Td right mono>{g.notas.length}</Td>
+                            <Td right mono>{fmtBRL(g.totalNotas)}</Td>
+                            <Td right mono>{fmtBRL(g.totalPago)}</Td>
+                            <Td right><span className="font-mono tabular-nums text-sm" style={{ color: g.pendente > 0.005 ? C.red : C.green }}>{fmtBRL(g.pendente)}</span></Td>
+                            <Td>
+                              <Chip tone={g.status === "Pago" ? "green" : g.status === "Parcial" ? "amber" : "red"}>
+                                {g.status}
+                              </Chip>
+                            </Td>
+                            <Td right>
+                              <button
+                                className="text-xs font-bold px-2 py-1 rounded-lg"
+                                style={{ color: C.blue, background: C.blueSoft }}
+                                onClick={() => { setModalFornecedorKey(g.key); setModalManualSel({}); }}
+                              >
+                                Detalhe
+                              </button>
+                            </Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ---- SEM NF AGRUPADO ---- */}
+          {tab === "semNFAgrupado" && (
+            <div className="space-y-4">
+              {relatorioSemNFAgrupado.length === 0 ? (
+                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                  Nenhum pagamento marcado como Sem NF ainda. Use a aba Conciliar.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    {[
+                      ["Grupos de justificativa", String(relatorioSemNFAgrupado.length), C.ink],
+                      ["Total sem NF", fmtBRL(relatorioSemNFAgrupado.reduce((s, g) => s + g.total, 0)), C.amber],
+                    ].map(([label, v, color]) => (
+                      <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                        <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
+                        <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                        <Th>Justificativa</Th><Th right>Qtd pagamentos</Th><Th right>Valor total</Th><Th></Th>
+                      </tr></thead>
+                      <tbody>
+                        {relatorioSemNFAgrupado.map((g) => (
+                          <tr key={g.motivo} style={{ borderBottom: `1px solid ${C.line}` }}>
+                            <Td><span className="font-semibold">{g.motivo}</span></Td>
+                            <Td right mono>{g.pagamentos.length}</Td>
+                            <Td right mono>{fmtBRL(g.total)}</Td>
+                            <Td right>
+                              <button
+                                className="text-xs font-bold px-2 py-1 rounded-lg"
+                                style={{ color: C.blue, background: C.blueSoft }}
+                                onClick={() => {
+                                  const motivos = {};
+                                  g.pagamentos.forEach((p) => { motivos[p.id] = semNF[p.id]?.motivo || ""; });
+                                  setSemNFInput((m) => ({ ...m, ...motivos }));
+                                  setModalGrupoSemNFKey(g.motivo);
+                                  setModalSemNFSel({});
+                                }}
+                              >
+                                Detalhe
+                              </button>
+                            </Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
         </div>
 
         <div className="text-xs mt-4 text-center" style={{ color: C.inkSoft }}>
           Os dados extraídos ficam salvos automaticamente entre sessões. PDFs são processados por IA — confira valores antes de fechar o mês.
         </div>
       </div>
+
+      {/* Modal detalhe fornecedor */}
+      {modalFornecedor && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setModalFornecedorKey(null)}>
+          <div className="rounded-xl w-full max-w-4xl my-4" style={{ background: C.card }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between p-4" style={{ borderBottom: `1px solid ${C.line}` }}>
+              <div>
+                <h2 className="text-lg font-bold">{modalFornecedor.fornecedor}</h2>
+                <div className="text-sm mt-0.5 flex flex-wrap gap-3" style={{ color: C.inkSoft }}>
+                  <span>CNPJ: <span className="font-mono">{modalFornecedor.cnpj || "—"}</span></span>
+                  <span>{modalFornecedor.notas.length} nota(s)</span>
+                  <span>Total <span className="font-mono font-semibold" style={{ color: C.ink }}>{fmtBRL(modalFornecedor.totalNotas)}</span></span>
+                  <span>Pago <span className="font-mono font-semibold" style={{ color: C.blue }}>{fmtBRL(modalFornecedor.totalPago)}</span></span>
+                  <span>Pendente <span className="font-mono font-semibold" style={{ color: modalFornecedor.pendente > 0.005 ? C.red : C.green }}>{fmtBRL(modalFornecedor.pendente)}</span></span>
+                </div>
+              </div>
+              <button className="text-xl ml-4 mt-0.5" style={{ color: C.inkSoft }} onClick={() => setModalFornecedorKey(null)}>✕</button>
+            </div>
+            <div className="p-4 space-y-4 overflow-y-auto" style={{ maxHeight: "70vh" }}>
+              {modalFornecedor.notas.map((inv) => {
+                const pago = pagoPorNota[inv.id] || 0;
+                const pendente = Math.max(0, inv.valor - pago);
+                const ls = links.filter((l) => l.invoiceId === inv.id);
+                return (
+                  <div key={inv.id} className="rounded-xl p-3" style={{ border: `1px solid ${C.line}` }}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <span className="font-semibold font-mono">NF {inv.numero}</span>
+                        <span className="text-sm ml-2" style={{ color: C.inkSoft }}>{fmtData(inv.dataEmissao)}</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3 text-sm">
+                        <span className="font-mono">Total: {fmtBRL(inv.valor)}</span>
+                        <span className="font-mono" style={{ color: C.blue }}>Pago: {fmtBRL(pago)}</span>
+                        <span className="font-mono" style={{ color: pendente > 0.005 ? C.red : C.green }}>Pendente: {fmtBRL(pendente)}</span>
+                        <Chip tone={pendente <= 0.005 ? "green" : pago > 0.005 ? "amber" : "red"}>
+                          {pendente <= 0.005 ? "Pago" : pago > 0.005 ? "Parcial" : "Em aberto"}
+                        </Chip>
+                      </div>
+                    </div>
+                    {ls.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkSoft }}>Pagamentos vinculados</div>
+                        {ls.map((l) => {
+                          const p = payments.find((x) => x.id === l.paymentId);
+                          return p ? (
+                            <div key={l.id} className="flex flex-wrap items-center justify-between gap-2 rounded px-2 py-1.5 text-sm" style={{ background: C.greenSoft }}>
+                              <span>{fmtData(p.data)} · {p.descricao.slice(0, 60)}</span>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-semibold">{fmtBRL(l.valor)}</span>
+                                <button className="text-xs" style={{ color: C.red }} onClick={() => desvincular(l.id)}>desvincular</button>
+                              </div>
+                            </div>
+                          ) : null;
+                        })}
+                      </div>
+                    )}
+                    {pendente > 0.005 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <select
+                          className="text-sm rounded-lg px-2 py-1 flex-1 min-w-0"
+                          style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                          value={modalManualSel[inv.id] || ""}
+                          onChange={(e) => setModalManualSel((m) => ({ ...m, [inv.id]: e.target.value }))}
+                        >
+                          <option value="">Vincular pagamento disponível…</option>
+                          {pagamentosDisponiveis.map((p) => {
+                            const alocado = links.filter((l) => l.paymentId === p.id).reduce((s, l) => s + l.valor, 0);
+                            return (
+                              <option key={p.id} value={p.id}>
+                                {fmtData(p.data)} · {p.descricao.slice(0, 50)} · disp. {fmtBRL(p.valor - alocado)}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <button
+                          disabled={!modalManualSel[inv.id]}
+                          className="px-3 py-1 rounded-lg text-xs font-bold text-white disabled:opacity-40"
+                          style={{ background: C.blue }}
+                          onClick={() => {
+                            const p = payments.find((x) => x.id === modalManualSel[inv.id]);
+                            if (p) vincular(p, inv);
+                            setModalManualSel((m) => ({ ...m, [inv.id]: "" }));
+                          }}
+                        >
+                          Vincular
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal detalhe grupo Sem NF */}
+      {modalGrupoSemNF && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: "rgba(0,0,0,0.6)" }} onClick={() => setModalGrupoSemNFKey(null)}>
+          <div className="rounded-xl w-full max-w-4xl my-4" style={{ background: C.card }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between p-4" style={{ borderBottom: `1px solid ${C.line}` }}>
+              <div>
+                <h2 className="text-lg font-bold">Sem NF — {modalGrupoSemNF.motivo}</h2>
+                <div className="text-sm mt-0.5" style={{ color: C.inkSoft }}>
+                  {modalGrupoSemNF.pagamentos.length} pagamento(s) · Total <span className="font-mono font-semibold" style={{ color: C.amber }}>{fmtBRL(modalGrupoSemNF.total)}</span>
+                </div>
+              </div>
+              <button className="text-xl ml-4 mt-0.5" style={{ color: C.inkSoft }} onClick={() => setModalGrupoSemNFKey(null)}>✕</button>
+            </div>
+            <div className="p-4 space-y-3 overflow-y-auto" style={{ maxHeight: "70vh" }}>
+              {modalGrupoSemNF.pagamentos.map((p) => (
+                <div key={p.id} className="rounded-xl p-3" style={{ border: `1px solid ${C.line}` }}>
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <div>
+                      <span className="font-mono text-sm">{fmtData(p.data)}</span>
+                      <span className="text-sm ml-2">{p.descricao}</span>
+                    </div>
+                    <span className="font-mono font-bold" style={{ color: C.ink }}>{fmtBRL(p.valor)}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      className="text-xs rounded-lg px-2 py-1"
+                      style={{ border: `1px solid ${C.line}`, background: "#fff", width: "200px" }}
+                      placeholder="Alterar justificativa…"
+                      value={semNFInput[p.id] !== undefined ? semNFInput[p.id] : (semNF[p.id]?.motivo || "")}
+                      onChange={(e) => setSemNFInput((m) => ({ ...m, [p.id]: e.target.value }))}
+                    />
+                    <button
+                      className="text-xs px-2 py-1 rounded-lg font-bold"
+                      style={{ background: C.amberSoft, color: C.amber }}
+                      onClick={() => {
+                        const novo = semNFInput[p.id]?.trim();
+                        if (novo) setSemNF((m) => ({ ...m, [p.id]: { motivo: novo } }));
+                      }}
+                    >
+                      Salvar motivo
+                    </button>
+                    <button
+                      className="text-xs px-2 py-1 rounded-lg font-bold"
+                      style={{ background: C.redSoft, color: C.red }}
+                      onClick={() => setSemNF((m) => { const n = { ...m }; delete n[p.id]; return n; })}
+                    >
+                      Remover justificativa
+                    </button>
+                    <select
+                      className="text-sm rounded-lg px-2 py-1 flex-1 min-w-0"
+                      style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                      value={modalSemNFSel[p.id] || ""}
+                      onChange={(e) => setModalSemNFSel((m) => ({ ...m, [p.id]: e.target.value }))}
+                    >
+                      <option value="">Vincular diretamente a nota fiscal…</option>
+                      {invoices
+                        .filter((inv) => Math.max(0, inv.valor - (pagoPorNota[inv.id] || 0)) > 0.005)
+                        .map((inv) => (
+                          <option key={inv.id} value={inv.id}>
+                            {inv.fornecedor} · NF {inv.numero} · restante {fmtBRL(Math.max(0, inv.valor - (pagoPorNota[inv.id] || 0)))}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      disabled={!modalSemNFSel[p.id]}
+                      className="text-xs px-2 py-1 rounded-lg font-bold text-white disabled:opacity-40"
+                      style={{ background: C.green }}
+                      onClick={() => {
+                        const inv = invoices.find((i) => i.id === modalSemNFSel[p.id]);
+                        if (inv) vincularERemoverSemNF(p, inv);
+                        setModalSemNFSel((m) => ({ ...m, [p.id]: "" }));
+                      }}
+                    >
+                      Vincular e remover
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal fallback de exportação (se o download direto for bloqueado) */}
       {saida && (
