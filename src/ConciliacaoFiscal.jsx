@@ -525,7 +525,9 @@ export default function ConciliacaoFiscal({ onLogout }) {
   const [manualSel, setManualSel] = useState({}); // paymentId -> invoiceId
   const [semNF, setSemNF] = useState({}); // paymentId -> { motivo: string }
   const [semNFInput, setSemNFInput] = useState({}); // paymentId -> texto digitado
-  const [pendenteEmissao, setPendenteEmissao] = useState({}); // paymentId -> { obs?: string }
+  const [pendenteEmissao, setPendenteEmissao] = useState({}); // paymentId -> { fornecedor?: string, obs?: string }
+  const [pendenteInputForn, setPendenteInputForn] = useState({}); // paymentId -> texto fornecedor
+  const [viewPendente, setViewPendente] = useState("lista"); // "lista" | "fornecedor"
   const [saida, setSaida] = useState(null); // { filename, content } fallback de exportação
   const [copiado, setCopiado] = useState(false);
   const [modalFornecedorKey, setModalFornecedorKey] = useState(null);
@@ -737,7 +739,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
 
   async function limparTudo() {
     setInvoices([]); setPayments([]); setLinks([]);
-    setManualSel({}); setSemNF({}); setSemNFInput({}); setPendenteEmissao({}); setErrors([]); setConfirmClear(false);
+    setManualSel({}); setSemNF({}); setSemNFInput({}); setPendenteEmissao({}); setPendenteInputForn({}); setErrors([]); setConfirmClear(false);
     try { await fetch("/api/storage?key=conciliacao%3Av1", { method: "DELETE", credentials: "include" }); } catch (e) { /* */ }
   }
 
@@ -1244,8 +1246,21 @@ export default function ConciliacaoFiscal({ onLogout }) {
                         >
                           Marcar sem NF
                         </button>
+                        <input
+                          type="text"
+                          placeholder="Fornecedor (para pendente de emissão)…"
+                          className="text-xs rounded-lg px-2 py-1 w-52"
+                          style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                          value={pendenteInputForn[p.id] || ""}
+                          onChange={(e) => setPendenteInputForn((m) => ({ ...m, [p.id]: e.target.value }))}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              setPendenteEmissao((m) => ({ ...m, [p.id]: { fornecedor: pendenteInputForn[p.id]?.trim() || "", obs: semNFInput[p.id]?.trim() || "" } }));
+                            }
+                          }}
+                        />
                         <button
-                          onClick={() => setPendenteEmissao((m) => ({ ...m, [p.id]: { obs: semNFInput[p.id]?.trim() || "" } }))}
+                          onClick={() => setPendenteEmissao((m) => ({ ...m, [p.id]: { fornecedor: pendenteInputForn[p.id]?.trim() || "", obs: semNFInput[p.id]?.trim() || "" } }))}
                           className="px-3 py-1 rounded-lg text-xs font-bold"
                           style={{ background: C.blueSoft, color: C.blue }}
                         >
@@ -1334,72 +1349,172 @@ export default function ConciliacaoFiscal({ onLogout }) {
           )}
 
           {/* ---- PENDENTE DE EMISSÃO DE NOTA ---- */}
-          {tab === "pendenteEmissao" && (
-            <div className="space-y-2">
-              {Object.keys(pendenteEmissao).length === 0 && (
-                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
-                  Nenhum pagamento marcado como "Pendente de emissão de nota" ainda. Use a aba Conciliar para marcar.
-                </div>
-              )}
-              {Object.keys(pendenteEmissao).length > 0 && (
-                <>
-                  <div className="grid grid-cols-2 gap-3 mb-3">
-                    {[
-                      ["Pagamentos pendentes", String(Object.keys(pendenteEmissao).length), C.ink],
-                      ["Total pendente de emissão", fmtBRL(Object.keys(pendenteEmissao).reduce((s, pid) => {
-                        const p = payments.find((x) => x.id === pid);
-                        return s + (p ? p.valor : 0);
-                      }, 0)), C.blue],
-                    ].map(([label, v, color]) => (
-                      <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
-                        <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
-                        <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color }}>{v}</div>
-                      </div>
-                    ))}
+          {tab === "pendenteEmissao" && (() => {
+            const entries = Object.entries(pendenteEmissao)
+              .map(([pid, val]) => ({ pid, val, p: payments.find((x) => x.id === pid) }))
+              .filter((e) => e.p);
+            const totalValor = entries.reduce((s, e) => s + e.p.valor, 0);
+
+            // visão agrupada por fornecedor
+            const grupos = {};
+            entries.forEach(({ pid, val, p }) => {
+              const key = (val.fornecedor || "").trim() || "(sem fornecedor)";
+              if (!grupos[key]) grupos[key] = { fornecedor: key, itens: [] };
+              grupos[key].itens.push({ pid, val, p });
+            });
+            const gruposArr = Object.values(grupos).sort((a, b) => {
+              const ta = a.itens.reduce((s, e) => s + e.p.valor, 0);
+              const tb = b.itens.reduce((s, e) => s + e.p.valor, 0);
+              return tb - ta;
+            });
+
+            return (
+              <div className="space-y-3">
+                {entries.length === 0 && (
+                  <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                    Nenhum pagamento marcado como "Pendente de emissão de nota" ainda. Use a aba Conciliar para marcar.
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
-                        <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Observação</Th><Th></Th>
-                      </tr></thead>
-                      <tbody>
-                        {Object.entries(pendenteEmissao).map(([pid, { obs }]) => {
-                          const p = payments.find((x) => x.id === pid);
-                          if (!p) return null;
+                )}
+                {entries.length > 0 && (
+                  <>
+                    {/* Totais + toggle de visão */}
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="grid grid-cols-2 gap-3 flex-1">
+                        {[
+                          ["Pagamentos pendentes", String(entries.length), C.ink],
+                          ["Total pendente de emissão", fmtBRL(totalValor), C.blue],
+                        ].map(([label, v, color]) => (
+                          <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                            <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
+                            <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color }}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex rounded-lg overflow-hidden shrink-0" style={{ border: `1px solid ${C.line}` }}>
+                        {[["lista", "Lista"], ["fornecedor", "Por fornecedor"]].map(([k, label]) => (
+                          <button
+                            key={k}
+                            onClick={() => setViewPendente(k)}
+                            className="px-3 py-1.5 text-xs font-semibold"
+                            style={viewPendente === k ? { background: C.blue, color: "#fff" } : { background: "#fff", color: C.inkSoft }}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* VISÃO LISTA */}
+                    {viewPendente === "lista" && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full">
+                          <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                            <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Fornecedor</Th><Th>Observação</Th><Th></Th>
+                          </tr></thead>
+                          <tbody>
+                            {entries.map(({ pid, val, p }) => (
+                              <tr key={pid} style={{ borderBottom: `1px solid ${C.line}`, background: C.blueSoft }}>
+                                <Td mono>{fmtData(p.data)}</Td>
+                                <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
+                                <Td right mono>{fmtBRL(p.valor)}</Td>
+                                <Td>
+                                  <input
+                                    type="text"
+                                    className="text-xs rounded px-2 py-1 w-full"
+                                    style={{ border: `1px solid ${C.line}`, background: "#fff", minWidth: "130px" }}
+                                    placeholder="Fornecedor…"
+                                    value={val.fornecedor || ""}
+                                    onChange={(e) => setPendenteEmissao((m) => ({ ...m, [pid]: { ...m[pid], fornecedor: e.target.value } }))}
+                                  />
+                                </Td>
+                                <Td>
+                                  <input
+                                    type="text"
+                                    className="text-xs rounded px-2 py-1 w-full"
+                                    style={{ border: `1px solid ${C.line}`, background: "#fff", minWidth: "120px" }}
+                                    placeholder="Observação…"
+                                    value={val.obs || ""}
+                                    onChange={(e) => setPendenteEmissao((m) => ({ ...m, [pid]: { ...m[pid], obs: e.target.value } }))}
+                                  />
+                                </Td>
+                                <Td right>
+                                  <button
+                                    className="text-xs"
+                                    style={{ color: C.red }}
+                                    onClick={() => setPendenteEmissao((m) => { const n = { ...m }; delete n[pid]; return n; })}
+                                  >
+                                    desfazer
+                                  </button>
+                                </Td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* VISÃO POR FORNECEDOR */}
+                    {viewPendente === "fornecedor" && (
+                      <div className="space-y-5">
+                        {gruposArr.map((g) => {
+                          const totalGrupo = g.itens.reduce((s, e) => s + e.p.valor, 0);
                           return (
-                            <tr key={pid} style={{ borderBottom: `1px solid ${C.line}`, background: C.blueSoft }}>
-                              <Td mono>{fmtData(p.data)}</Td>
-                              <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
-                              <Td right mono>{fmtBRL(p.valor)}</Td>
-                              <Td>
-                                <input
-                                  type="text"
-                                  className="text-xs rounded px-2 py-1 w-full"
-                                  style={{ border: `1px solid ${C.line}`, background: "#fff" }}
-                                  placeholder="Observação (opcional)…"
-                                  value={obs}
-                                  onChange={(e) => setPendenteEmissao((m) => ({ ...m, [pid]: { obs: e.target.value } }))}
-                                />
-                              </Td>
-                              <Td right>
-                                <button
-                                  className="text-xs"
-                                  style={{ color: C.red }}
-                                  onClick={() => setPendenteEmissao((m) => { const n = { ...m }; delete n[pid]; return n; })}
-                                >
-                                  desfazer
-                                </button>
-                              </Td>
-                            </tr>
+                            <div key={g.fornecedor}>
+                              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg mb-2"
+                                style={{ background: C.blueSoft }}>
+                                <div className="font-bold text-sm" style={{ color: C.blue }}>
+                                  {g.fornecedor}
+                                  <span className="ml-2 text-xs font-normal" style={{ color: C.inkSoft }}>
+                                    {g.itens.length} pagamento(s)
+                                  </span>
+                                </div>
+                                <span className="font-mono font-bold text-sm" style={{ color: C.blue }}>{fmtBRL(totalGrupo)}</span>
+                              </div>
+                              <div className="overflow-x-auto">
+                                <table className="w-full">
+                                  <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                                    <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Observação</Th><Th></Th>
+                                  </tr></thead>
+                                  <tbody>
+                                    {g.itens.map(({ pid, val, p }) => (
+                                      <tr key={pid} style={{ borderBottom: `1px solid ${C.line}` }}>
+                                        <Td mono>{fmtData(p.data)}</Td>
+                                        <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
+                                        <Td right mono>{fmtBRL(p.valor)}</Td>
+                                        <Td>
+                                          <input
+                                            type="text"
+                                            className="text-xs rounded px-2 py-1 w-full"
+                                            style={{ border: `1px solid ${C.line}`, background: "#fff", minWidth: "120px" }}
+                                            placeholder="Observação…"
+                                            value={val.obs || ""}
+                                            onChange={(e) => setPendenteEmissao((m) => ({ ...m, [pid]: { ...m[pid], obs: e.target.value } }))}
+                                          />
+                                        </Td>
+                                        <Td right>
+                                          <button
+                                            className="text-xs"
+                                            style={{ color: C.red }}
+                                            onClick={() => setPendenteEmissao((m) => { const n = { ...m }; delete n[pid]; return n; })}
+                                          >
+                                            desfazer
+                                          </button>
+                                        </Td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
                           );
                         })}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })()}
 
           {/* ---- RELATÓRIOS ---- */}
           {tab === "relatorios" && (
