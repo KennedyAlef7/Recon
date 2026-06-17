@@ -311,7 +311,24 @@ async function parseXLSXExtrato(file) {
   const wb = XLSX.read(buf, { type: "array" });
   const out = [];
   for (const sheetName of wb.SheetNames) {
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
+    const ws = wb.Sheets[sheetName];
+
+    // Corrige dimension incorreta (bug do exportador do Itaú): recalcula o range
+    // varrendo todas as chaves de célula reais do sheet.
+    if (ws["!ref"]) {
+      const declaredRange = XLSX.utils.decode_range(ws["!ref"]);
+      let maxRow = declaredRange.e.r;
+      let maxCol = declaredRange.e.c;
+      for (const key of Object.keys(ws)) {
+        if (key.startsWith("!")) continue;
+        const addr = XLSX.utils.decode_cell(key);
+        if (addr.r > maxRow) maxRow = addr.r;
+        if (addr.c > maxCol) maxCol = addr.c;
+      }
+      ws["!ref"] = XLSX.utils.encode_range({ s: declaredRange.s, e: { r: maxRow, c: maxCol } });
+    }
+
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: "" });
     if (!rows.length) continue;
 
     // localiza a linha de cabeçalho da tabela
@@ -647,8 +664,10 @@ export default function ConciliacaoFiscal({ onLogout }) {
             }
           }
           if (!extraidos.length) errs.push(`${f.name}: nenhuma saída encontrada`);
-          if (novos.length) setPayments((prev) => [...prev, ...novos]);
-          arquivosJaImportados.add(f.name);
+          if (novos.length) {
+            setPayments((prev) => [...prev, ...novos]);
+            arquivosJaImportados.add(f.name); // só bloqueia reimport se ao menos 1 registro novo foi adicionado
+          }
         }
       } catch (e) {
         errs.push(`${f.name}: ${e.message}`);
