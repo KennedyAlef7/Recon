@@ -525,6 +525,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
   const [manualSel, setManualSel] = useState({}); // paymentId -> invoiceId
   const [semNF, setSemNF] = useState({}); // paymentId -> { motivo: string }
   const [semNFInput, setSemNFInput] = useState({}); // paymentId -> texto digitado
+  const [pendenteEmissao, setPendenteEmissao] = useState({}); // paymentId -> { obs?: string }
   const [saida, setSaida] = useState(null); // { filename, content } fallback de exportação
   const [copiado, setCopiado] = useState(false);
   const [modalFornecedorKey, setModalFornecedorKey] = useState(null);
@@ -560,6 +561,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
             setPayments(d.payments || []);
             setLinks(d.links || []);
             setSemNF(d.semNF || {});
+            setPendenteEmissao(d.pendenteEmissao || {});
           }
         }
       } catch (e) {
@@ -578,13 +580,13 @@ export default function ConciliacaoFiscal({ onLogout }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ key: "conciliacao:v1", value: JSON.stringify({ invoices, payments, links, semNF }) }),
+          body: JSON.stringify({ key: "conciliacao:v1", value: JSON.stringify({ invoices, payments, links, semNF, pendenteEmissao }) }),
         });
       } catch (e) {
         console.error("Falha ao salvar", e);
       }
     }, 600);
-  }, [invoices, payments, links, semNF, loaded]);
+  }, [invoices, payments, links, semNF, pendenteEmissao, loaded]);
 
   const pagoPorNota = useMemo(() => {
     const m = {};
@@ -701,7 +703,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
 
   // ---- export / import estado completo ----
   function exportarEstado() {
-    const estado = { versao: 2, exportadoEm: new Date().toISOString(), invoices, payments, links, semNF };
+    const estado = { versao: 2, exportadoEm: new Date().toISOString(), invoices, payments, links, semNF, pendenteEmissao };
     const json = JSON.stringify(estado, null, 2);
     entregarArquivo(`conciliacao_${new Date().toISOString().slice(0, 10)}.json`, json, "application/json;charset=utf-8", setSaida);
   }
@@ -720,6 +722,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
         setPayments(d.payments);
         setLinks(Array.isArray(d.links) ? d.links : []);
         setSemNF(d.semNF && typeof d.semNF === "object" ? d.semNF : {});
+        setPendenteEmissao(d.pendenteEmissao && typeof d.pendenteEmissao === "object" ? d.pendenteEmissao : {});
         setManualSel({});
         setSemNFInput({});
         setErrors([`✓ Estado restaurado com sucesso: ${d.invoices.length} nota(s), ${d.payments.length} pagamento(s), ${(d.links||[]).length} vínculo(s)${d.exportadoEm ? ` — exportado em ${new Date(d.exportadoEm).toLocaleString("pt-BR")}` : ""}.`]);
@@ -734,7 +737,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
 
   async function limparTudo() {
     setInvoices([]); setPayments([]); setLinks([]);
-    setManualSel({}); setSemNF({}); setSemNFInput({}); setErrors([]); setConfirmClear(false);
+    setManualSel({}); setSemNF({}); setSemNFInput({}); setPendenteEmissao({}); setErrors([]); setConfirmClear(false);
     try { await fetch("/api/storage?key=conciliacao%3Av1", { method: "DELETE", credentials: "include" }); } catch (e) { /* */ }
   }
 
@@ -755,19 +758,21 @@ export default function ConciliacaoFiscal({ onLogout }) {
       payments.map((p) => {
         const ls = linksPorPagamento[p.id] || [];
         const flagSemNF = !!semNF[p.id];
+        const flagPendente = !!pendenteEmissao[p.id];
         const fornecedores = [...new Set(ls.map((l) => invoices.find((i) => i.id === l.invoiceId)?.fornecedor).filter(Boolean))];
-        return { p, temNota: ls.length > 0, flagSemNF, motivo: semNF[p.id]?.motivo || "", fornecedor: fornecedores.join(" / ") };
+        return { p, temNota: ls.length > 0, flagSemNF, flagPendente, motivo: semNF[p.id]?.motivo || "", obs: pendenteEmissao[p.id]?.obs || "", fornecedor: fornecedores.join(" / ") };
       }),
-    [payments, linksPorPagamento, invoices, semNF]
+    [payments, linksPorPagamento, invoices, semNF, pendenteEmissao]
   );
 
   const totais = useMemo(() => {
     const tNotas = invoices.reduce((s, i) => s + i.valor, 0);
     const tPagos = payments.reduce((s, p) => s + p.valor, 0);
-    const tSemNota = relatorioB.filter((r) => !r.temNota && !r.flagSemNF).reduce((s, r) => s + r.p.valor, 0);
+    const tSemNota = relatorioB.filter((r) => !r.temNota && !r.flagSemNF && !r.flagPendente).reduce((s, r) => s + r.p.valor, 0);
     const tSemNFFlag = relatorioB.filter((r) => r.flagSemNF).reduce((s, r) => s + r.p.valor, 0);
+    const tPendenteEmissao = relatorioB.filter((r) => r.flagPendente).reduce((s, r) => s + r.p.valor, 0);
     const tPendente = relatorioA.reduce((s, r) => s + r.pendente, 0);
-    return { tNotas, tPagos, tSemNota, tPendente, tSemNFFlag };
+    return { tNotas, tPagos, tSemNota, tPendente, tSemNFFlag, tPendenteEmissao };
   }, [invoices, payments, relatorioA, relatorioB]);
 
   const relatorioFornecedores = useMemo(() => {
@@ -821,10 +826,10 @@ export default function ConciliacaoFiscal({ onLogout }) {
   const totaisExtrato = useMemo(() => {
     const total = paymentsFiltrados.reduce((s, p) => s + p.valor, 0);
     const comNota = paymentsFiltrados.filter((p) => (linksPorPagamento[p.id] || []).length > 0).reduce((s, p) => s + p.valor, 0);
-    const semNota = paymentsFiltrados.filter((p) => !(linksPorPagamento[p.id] || []).length && !semNF[p.id]).reduce((s, p) => s + p.valor, 0);
+    const semNota = paymentsFiltrados.filter((p) => !(linksPorPagamento[p.id] || []).length && !semNF[p.id] && !pendenteEmissao[p.id]).reduce((s, p) => s + p.valor, 0);
     const identificado = paymentsFiltrados.filter((p) => semNF[p.id]).reduce((s, p) => s + p.valor, 0);
     return { total, comNota, semNota, identificado, qtd: paymentsFiltrados.length };
-  }, [paymentsFiltrados, linksPorPagamento, semNF]);
+  }, [paymentsFiltrados, linksPorPagamento, semNF, pendenteEmissao]);
 
   // Meses disponíveis nas notas (para o filtro)
   const mesesDisponiveis = useMemo(() => {
@@ -877,6 +882,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
 
   const pendentesConciliar = payments.filter((p) => {
     if (semNF[p.id]) return false;
+    if (pendenteEmissao[p.id]) return false;
     const alocado = (linksPorPagamento[p.id] || []).reduce((s, l) => s + l.valor, 0);
     return p.valor - alocado > 0.005;
   });
@@ -886,6 +892,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
     ["extratos", `Extratos (${payments.length})`],
     ["conciliar", `Conciliar (${pendentesConciliar.length})`],
     ["semNF", `Sem NF (${Object.keys(semNF).length})`],
+    ["pendenteEmissao", `Pend. emissão (${Object.keys(pendenteEmissao).length})`],
     ["relatorios", "Relatórios"],
     ["porFornecedor", `Por fornecedor (${relatorioFornecedores.length})`],
     ["porMes", "Por mês / NF"],
@@ -941,12 +948,13 @@ export default function ConciliacaoFiscal({ onLogout }) {
         </div>
 
         {/* Totais */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mt-4">
           {[
             ["Total em notas", totais.tNotas, C.ink],
             ["Total pago (saídas)", totais.tPagos, C.blue],
             ["Pendente de pagamento", totais.tPendente, C.amber],
             ["Sem NF — identificado", totais.tSemNFFlag, C.amber],
+            ["Pend. emissão de nota", totais.tPendenteEmissao, C.blue],
             ["Sem NF — pendente", totais.tSemNota, C.red],
           ].map(([label, v, color]) => (
             <div key={label} className="rounded-xl p-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
@@ -1109,7 +1117,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
                               <Td mono>{fmtData(p.data)}</Td>
                               <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
                               <Td right mono>{fmtBRL(p.valor)}</Td>
-                              <Td>{ls.length ? <Chip tone="green">Com nota</Chip> : semNF[p.id] ? <Chip tone="amber">Sem NF — {semNF[p.id].motivo}</Chip> : <Chip tone="red">Sem nota</Chip>}</Td>
+                              <Td>{ls.length ? <Chip tone="green">Com nota</Chip> : pendenteEmissao[p.id] ? <Chip tone="blue">Pend. emissão</Chip> : semNF[p.id] ? <Chip tone="amber">Sem NF — {semNF[p.id].motivo}</Chip> : <Chip tone="red">Sem nota</Chip>}</Td>
                               <Td right>
                                 <button className="text-xs" style={{ color: C.red }} onClick={() => {
                                   setPayments((prev) => prev.filter((x) => x.id !== p.id));
@@ -1236,6 +1244,13 @@ export default function ConciliacaoFiscal({ onLogout }) {
                         >
                           Marcar sem NF
                         </button>
+                        <button
+                          onClick={() => setPendenteEmissao((m) => ({ ...m, [p.id]: { obs: semNFInput[p.id]?.trim() || "" } }))}
+                          className="px-3 py-1 rounded-lg text-xs font-bold"
+                          style={{ background: C.blueSoft, color: C.blue }}
+                        >
+                          Pendente de emissão de nota
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1318,6 +1333,74 @@ export default function ConciliacaoFiscal({ onLogout }) {
             </div>
           )}
 
+          {/* ---- PENDENTE DE EMISSÃO DE NOTA ---- */}
+          {tab === "pendenteEmissao" && (
+            <div className="space-y-2">
+              {Object.keys(pendenteEmissao).length === 0 && (
+                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                  Nenhum pagamento marcado como "Pendente de emissão de nota" ainda. Use a aba Conciliar para marcar.
+                </div>
+              )}
+              {Object.keys(pendenteEmissao).length > 0 && (
+                <>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    {[
+                      ["Pagamentos pendentes", String(Object.keys(pendenteEmissao).length), C.ink],
+                      ["Total pendente de emissão", fmtBRL(Object.keys(pendenteEmissao).reduce((s, pid) => {
+                        const p = payments.find((x) => x.id === pid);
+                        return s + (p ? p.valor : 0);
+                      }, 0)), C.blue],
+                    ].map(([label, v, color]) => (
+                      <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                        <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
+                        <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                        <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Observação</Th><Th></Th>
+                      </tr></thead>
+                      <tbody>
+                        {Object.entries(pendenteEmissao).map(([pid, { obs }]) => {
+                          const p = payments.find((x) => x.id === pid);
+                          if (!p) return null;
+                          return (
+                            <tr key={pid} style={{ borderBottom: `1px solid ${C.line}`, background: C.blueSoft }}>
+                              <Td mono>{fmtData(p.data)}</Td>
+                              <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
+                              <Td right mono>{fmtBRL(p.valor)}</Td>
+                              <Td>
+                                <input
+                                  type="text"
+                                  className="text-xs rounded px-2 py-1 w-full"
+                                  style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                                  placeholder="Observação (opcional)…"
+                                  value={obs}
+                                  onChange={(e) => setPendenteEmissao((m) => ({ ...m, [pid]: { obs: e.target.value } }))}
+                                />
+                              </Td>
+                              <Td right>
+                                <button
+                                  className="text-xs"
+                                  style={{ color: C.red }}
+                                  onClick={() => setPendenteEmissao((m) => { const n = { ...m }; delete n[pid]; return n; })}
+                                >
+                                  desfazer
+                                </button>
+                              </Td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           {/* ---- RELATÓRIOS ---- */}
           {tab === "relatorios" && (
             <div className="space-y-8">
@@ -1379,13 +1462,15 @@ export default function ConciliacaoFiscal({ onLogout }) {
                     onClick={() =>
                       exportCSV(
                         "relatorio_B_pagamentos.csv",
-                        ["Data", "Fornecedor / Descricao", "Valor pago", "Tem nota emitida", "Flag Sem NF", "Motivo"],
+                        ["Data", "Fornecedor / Descricao", "Valor pago", "Tem nota emitida", "Flag Sem NF", "Motivo", "Pend. Emissao", "Obs"],
                         relatorioB.map((r) => [
                           fmtData(r.p.data), r.fornecedor || r.p.descricao,
                           r.p.valor.toFixed(2).replace(".", ","),
                           r.temNota ? "Sim" : "Nao",
                           r.flagSemNF ? "Sim" : "",
                           r.motivo,
+                          r.flagPendente ? "Sim" : "",
+                          r.obs,
                         ]),
                         setSaida
                       )
@@ -1405,7 +1490,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
                           <Td mono>{fmtData(r.p.data)}</Td>
                           <Td>{r.fornecedor ? <><strong>{r.fornecedor}</strong><div className="text-xs" style={{ color: C.inkSoft }}>{r.p.descricao}</div></> : r.p.descricao}</Td>
                           <Td right mono>{fmtBRL(r.p.valor)}</Td>
-                          <Td>{r.temNota ? <Chip tone="green">Sim</Chip> : r.flagSemNF ? <Chip tone="amber">Sem NF</Chip> : <Chip tone="red">Não</Chip>}</Td>
+                          <Td>{r.temNota ? <Chip tone="green">Sim</Chip> : r.flagPendente ? <Chip tone="blue">Pend. emissão</Chip> : r.flagSemNF ? <Chip tone="amber">Sem NF</Chip> : <Chip tone="red">Não</Chip>}</Td>
                           <Td><span className="text-xs" style={{ color: C.amber }}>{r.motivo}</span></Td>
                         </tr>
                       ))}

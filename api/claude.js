@@ -1,7 +1,7 @@
 import { estaAutenticado } from "./_auth.js";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
