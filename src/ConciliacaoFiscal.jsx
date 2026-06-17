@@ -515,6 +515,11 @@ export default function ConciliacaoFiscal({ onLogout }) {
   const [modalManualSel, setModalManualSel] = useState({});
   const [modalSemNFSel, setModalSemNFSel] = useState({});
   const [confirmClear, setConfirmClear] = useState(false);
+  const [filtroMes, setFiltroMes] = useState(""); // "YYYY-MM"
+  const [filtroFornecedor, setFiltroFornecedor] = useState("");
+  const [filtroExtMes, setFiltroExtMes] = useState(""); // filtro aba extratos
+  const [filtroExtDesc, setFiltroExtDesc] = useState("");
+  const [duplicadosPendentes, setDuplicadosPendentes] = useState([]); // [{arquivo, registro}]
   const confirmTimer = useRef(null);
   const saveTimer = useRef(null);
 
@@ -618,6 +623,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
     const errs = [];
     const arquivosJaImportados = new Set(payments.map((p) => p.arquivo));
     const chavesExistentes = new Set(payments.map((p) => `${p.data}|${p.valor.toFixed(2)}|${norm(p.descricao)}`));
+    const duplicadosEncontrados = [];
     for (let i = 0; i < list.length; i++) {
       const f = list[i];
       try {
@@ -631,13 +637,15 @@ export default function ConciliacaoFiscal({ onLogout }) {
           else if (/\.pdf$/i.test(f.name)) extraidos = await extrairExtratoPDF(f);
           else throw new Error("Formato não suportado (use OFX, XLS/XLSX, CSV ou PDF)");
           const novos = [];
-          let duplicados = 0;
           for (const t of extraidos) {
             const chave = `${t.data}|${t.valor.toFixed(2)}|${norm(t.descricao)}`;
-            if (chavesExistentes.has(chave)) duplicados++;
-            else { chavesExistentes.add(chave); novos.push(t); }
+            if (chavesExistentes.has(chave)) {
+              duplicadosEncontrados.push({ arquivo: f.name, registro: t });
+            } else {
+              chavesExistentes.add(chave);
+              novos.push(t);
+            }
           }
-          if (duplicados) errs.push(`${f.name}: ${duplicados} lançamento(s) duplicado(s) ignorado(s)`);
           if (!extraidos.length) errs.push(`${f.name}: nenhuma saída encontrada`);
           if (novos.length) setPayments((prev) => [...prev, ...novos]);
           arquivosJaImportados.add(f.name);
@@ -646,6 +654,9 @@ export default function ConciliacaoFiscal({ onLogout }) {
         errs.push(`${f.name}: ${e.message}`);
       }
       setProgress({ done: i + 1, total: list.length, label: "Lendo extratos" });
+    }
+    if (duplicadosEncontrados.length) {
+      setDuplicadosPendentes((prev) => [...prev, ...duplicadosEncontrados]);
     }
     setErrors(errs);
     setProgress(null);
@@ -771,6 +782,61 @@ export default function ConciliacaoFiscal({ onLogout }) {
       .sort((a, b) => b.total - a.total);
   }, [semNF, payments]);
 
+  // Meses disponíveis nos extratos
+  const mesesExtrato = useMemo(() => {
+    const set = new Set(payments.map((p) => (p.data || "").slice(0, 7)).filter(Boolean));
+    return [...set].sort();
+  }, [payments]);
+
+  // Pagamentos filtrados (aba extratos)
+  const paymentsFiltrados = useMemo(() => {
+    const fnorm = norm(filtroExtDesc);
+    return payments.filter((p) => {
+      const mesOk = !filtroExtMes || (p.data || "").startsWith(filtroExtMes);
+      const descOk = !fnorm || norm(p.descricao).includes(fnorm);
+      return mesOk && descOk;
+    });
+  }, [payments, filtroExtMes, filtroExtDesc]);
+
+  // Sumarizados do extrato filtrado
+  const totaisExtrato = useMemo(() => {
+    const total = paymentsFiltrados.reduce((s, p) => s + p.valor, 0);
+    const comNota = paymentsFiltrados.filter((p) => (linksPorPagamento[p.id] || []).length > 0).reduce((s, p) => s + p.valor, 0);
+    const semNota = paymentsFiltrados.filter((p) => !(linksPorPagamento[p.id] || []).length && !semNF[p.id]).reduce((s, p) => s + p.valor, 0);
+    const identificado = paymentsFiltrados.filter((p) => semNF[p.id]).reduce((s, p) => s + p.valor, 0);
+    return { total, comNota, semNota, identificado, qtd: paymentsFiltrados.length };
+  }, [paymentsFiltrados, linksPorPagamento, semNF]);
+
+  // Meses disponíveis nas notas (para o filtro)
+  const mesesDisponiveis = useMemo(() => {
+    const set = new Set(invoices.map((inv) => (inv.dataEmissao || "").slice(0, 7)).filter(Boolean));
+    return [...set].sort();
+  }, [invoices]);
+
+  // Visão agrupada por mês → notas (com filtros)
+  const relatorioPorMes = useMemo(() => {
+    const fnorm = norm(filtroFornecedor);
+    const filtered = invoices.filter((inv) => {
+      const mesOk = !filtroMes || (inv.dataEmissao || "").startsWith(filtroMes);
+      const fornOk = !fnorm || norm(inv.fornecedor).includes(fnorm);
+      return mesOk && fornOk;
+    });
+    const grupos = {};
+    filtered.forEach((inv) => {
+      const mes = (inv.dataEmissao || "").slice(0, 7) || "sem-data";
+      if (!grupos[mes]) grupos[mes] = { mes, notas: [] };
+      grupos[mes].notas.push(inv);
+    });
+    return Object.values(grupos)
+      .sort((a, b) => a.mes.localeCompare(b.mes))
+      .map((g) => ({
+        ...g,
+        totalNotas: g.notas.reduce((s, n) => s + n.valor, 0),
+        totalPago: g.notas.reduce((s, n) => s + (pagoPorNota[n.id] || 0), 0),
+        pendente: g.notas.reduce((s, n) => s + Math.max(0, n.valor - (pagoPorNota[n.id] || 0)), 0),
+      }));
+  }, [invoices, pagoPorNota, filtroMes, filtroFornecedor]);
+
   const modalFornecedor = useMemo(
     () => (modalFornecedorKey ? relatorioFornecedores.find((g) => g.key === modalFornecedorKey) ?? null : null),
     [modalFornecedorKey, relatorioFornecedores]
@@ -803,6 +869,7 @@ export default function ConciliacaoFiscal({ onLogout }) {
     ["semNF", `Sem NF (${Object.keys(semNF).length})`],
     ["relatorios", "Relatórios"],
     ["porFornecedor", `Por fornecedor (${relatorioFornecedores.length})`],
+    ["porMes", "Por mês / NF"],
     ["semNFAgrupado", `Sem NF agrupado (${relatorioSemNFAgrupado.length})`],
   ];
 
@@ -951,32 +1018,97 @@ export default function ConciliacaoFiscal({ onLogout }) {
                 hint="Somente as saídas (débitos/pagamentos) são importadas. OFX, Excel e CSV são lidos localmente; PDF usa IA. Extratos Itaú 'Lançamentos' (.xlsx) são reconhecidos automaticamente, incluindo Razão Social e CNPJ do favorecido."
               />
               {payments.length > 0 && (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
-                      <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Status</Th><Th></Th>
-                    </tr></thead>
-                    <tbody>
-                      {payments.map((p) => {
-                        const ls = linksPorPagamento[p.id] || [];
-                        return (
-                          <tr key={p.id} style={{ borderBottom: `1px solid ${C.line}` }}>
-                            <Td mono>{fmtData(p.data)}</Td>
-                            <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
-                            <Td right mono>{fmtBRL(p.valor)}</Td>
-                            <Td>{ls.length ? <Chip tone="green">Com nota</Chip> : semNF[p.id] ? <Chip tone="amber">Sem NF — {semNF[p.id].motivo}</Chip> : <Chip tone="red">Sem nota</Chip>}</Td>
-                            <Td right>
-                              <button className="text-xs" style={{ color: C.red }} onClick={() => {
-                                setPayments((prev) => prev.filter((x) => x.id !== p.id));
-                                setLinks((prev) => prev.filter((l) => l.paymentId !== p.id));
-                              }}>excluir</button>
-                            </Td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                <>
+                  {/* Filtros */}
+                  <div className="flex flex-wrap gap-3 items-end">
+                    <div>
+                      <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkSoft }}>Mês</div>
+                      <select
+                        className="text-sm rounded-lg px-3 py-1.5"
+                        style={{ border: `1px solid ${C.line}`, background: "#fff", minWidth: "150px" }}
+                        value={filtroExtMes}
+                        onChange={(e) => setFiltroExtMes(e.target.value)}
+                      >
+                        <option value="">Todos os meses</option>
+                        {mesesExtrato.map((m) => {
+                          const [y, mo] = m.split("-");
+                          return <option key={m} value={m}>{mo}/{y}</option>;
+                        })}
+                      </select>
+                    </div>
+                    <div className="flex-1 min-w-[200px]">
+                      <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkSoft }}>Descrição / Fornecedor</div>
+                      <input
+                        type="text"
+                        placeholder="Filtrar por descrição ou fornecedor…"
+                        className="w-full text-sm rounded-lg px-3 py-1.5"
+                        style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                        value={filtroExtDesc}
+                        onChange={(e) => setFiltroExtDesc(e.target.value)}
+                      />
+                    </div>
+                    {(filtroExtMes || filtroExtDesc) && (
+                      <button
+                        className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                        style={{ color: C.inkSoft, background: "#EEF1F0" }}
+                        onClick={() => { setFiltroExtMes(""); setFiltroExtDesc(""); }}
+                      >
+                        Limpar filtros
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Sumarizados */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      ["Total saídas", totaisExtrato.total, C.ink],
+                      ["Com nota vinculada", totaisExtrato.comNota, C.green],
+                      ["Sem NF — identificado", totaisExtrato.identificado, C.amber],
+                      ["Sem nota", totaisExtrato.semNota, C.red],
+                    ].map(([label, v, color]) => (
+                      <div key={label} className="rounded-xl p-3" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                        <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>{label}</div>
+                        <div className="text-base font-bold font-mono tabular-nums mt-1" style={{ color }}>{fmtBRL(v)}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Tabela */}
+                  <div className="overflow-x-auto">
+                    <div className="text-xs mb-1" style={{ color: C.inkSoft }}>
+                      {totaisExtrato.qtd} lançamento(s) exibido(s) de {payments.length} total
+                    </div>
+                    <table className="w-full">
+                      <thead><tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                        <Th>Data</Th><Th>Descrição</Th><Th right>Valor</Th><Th>Status</Th><Th></Th>
+                      </tr></thead>
+                      <tbody>
+                        {paymentsFiltrados.map((p) => {
+                          const ls = linksPorPagamento[p.id] || [];
+                          return (
+                            <tr key={p.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                              <Td mono>{fmtData(p.data)}</Td>
+                              <Td>{p.descricao}<div className="text-xs" style={{ color: C.inkSoft }}>{p.arquivo}</div></Td>
+                              <Td right mono>{fmtBRL(p.valor)}</Td>
+                              <Td>{ls.length ? <Chip tone="green">Com nota</Chip> : semNF[p.id] ? <Chip tone="amber">Sem NF — {semNF[p.id].motivo}</Chip> : <Chip tone="red">Sem nota</Chip>}</Td>
+                              <Td right>
+                                <button className="text-xs" style={{ color: C.red }} onClick={() => {
+                                  setPayments((prev) => prev.filter((x) => x.id !== p.id));
+                                  setLinks((prev) => prev.filter((l) => l.paymentId !== p.id));
+                                }}>excluir</button>
+                              </Td>
+                            </tr>
+                          );
+                        })}
+                        {paymentsFiltrados.length === 0 && (
+                          <tr><td colSpan={5} className="text-sm py-6 text-center" style={{ color: C.inkSoft }}>
+                            Nenhum lançamento encontrado para os filtros selecionados.
+                          </td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -1327,6 +1459,156 @@ export default function ConciliacaoFiscal({ onLogout }) {
             </div>
           )}
 
+          {/* ---- POR MÊS / NF ---- */}
+          {tab === "porMes" && (
+            <div className="space-y-4">
+              {/* Filtros */}
+              <div className="flex flex-wrap gap-3 items-end">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkSoft }}>Mês</div>
+                  <select
+                    className="text-sm rounded-lg px-3 py-1.5"
+                    style={{ border: `1px solid ${C.line}`, background: "#fff", minWidth: "150px" }}
+                    value={filtroMes}
+                    onChange={(e) => setFiltroMes(e.target.value)}
+                  >
+                    <option value="">Todos os meses</option>
+                    {mesesDisponiveis.map((m) => {
+                      const [y, mo] = m.split("-");
+                      const label = `${mo}/${y}`;
+                      return <option key={m} value={m}>{label}</option>;
+                    })}
+                  </select>
+                </div>
+                <div className="flex-1 min-w-[200px]">
+                  <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: C.inkSoft }}>Fornecedor</div>
+                  <input
+                    type="text"
+                    placeholder="Filtrar por fornecedor…"
+                    className="w-full text-sm rounded-lg px-3 py-1.5"
+                    style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                    value={filtroFornecedor}
+                    onChange={(e) => setFiltroFornecedor(e.target.value)}
+                  />
+                </div>
+                {(filtroMes || filtroFornecedor) && (
+                  <button
+                    className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                    style={{ color: C.inkSoft, background: "#EEF1F0" }}
+                    onClick={() => { setFiltroMes(""); setFiltroFornecedor(""); }}
+                  >
+                    Limpar filtros
+                  </button>
+                )}
+                <button
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg text-white ml-auto"
+                  style={{ background: C.green }}
+                  onClick={() => {
+                    const rows = [];
+                    relatorioPorMes.forEach((g) => {
+                      g.notas.forEach((inv) => {
+                        const pago = pagoPorNota[inv.id] || 0;
+                        const pendente = Math.max(0, inv.valor - pago);
+                        const status = pago <= 0.005 ? "Em aberto" : pendente <= 0.005 ? "Paga" : "Parcial";
+                        rows.push([
+                          g.mes ? `${g.mes.slice(5, 7)}/${g.mes.slice(0, 4)}` : "—",
+                          inv.fornecedor, inv.cnpj || "", inv.numero,
+                          fmtData(inv.dataEmissao),
+                          inv.valor.toFixed(2).replace(".", ","),
+                          pago.toFixed(2).replace(".", ","),
+                          pendente.toFixed(2).replace(".", ","),
+                          status,
+                        ]);
+                      });
+                    });
+                    exportCSV(
+                      "por_mes_nf.csv",
+                      ["Mês", "Fornecedor", "CNPJ", "Nº NF", "Emissão", "Valor NF", "Pago", "Pendente", "Status"],
+                      rows,
+                      setSaida
+                    );
+                  }}
+                >
+                  Exportar CSV
+                </button>
+              </div>
+
+              {invoices.length === 0 ? (
+                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                  Nenhuma nota importada ainda. Importe notas fiscais na aba Notas fiscais.
+                </div>
+              ) : relatorioPorMes.length === 0 ? (
+                <div className="text-sm py-8 text-center" style={{ color: C.inkSoft }}>
+                  Nenhuma nota encontrada para os filtros selecionados.
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {relatorioPorMes.map((g) => {
+                    const [y, mo] = (g.mes !== "sem-data" ? g.mes : "").split("-");
+                    const mesLabel = mo && y ? `${mo}/${y}` : "Sem data";
+                    return (
+                      <div key={g.mes}>
+                        {/* Cabeçalho do mês */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg mb-2"
+                          style={{ background: C.greenSoft }}>
+                          <div className="font-bold text-sm" style={{ color: C.green }}>
+                            {mesLabel}
+                            <span className="ml-2 text-xs font-normal" style={{ color: C.inkSoft }}>
+                              {g.notas.length} nota(s)
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-3 text-xs font-mono">
+                            <span style={{ color: C.ink }}>Total: <strong>{fmtBRL(g.totalNotas)}</strong></span>
+                            <span style={{ color: C.blue }}>Pago: <strong>{fmtBRL(g.totalPago)}</strong></span>
+                            <span style={{ color: g.pendente > 0.005 ? C.red : C.green }}>Pendente: <strong>{fmtBRL(g.pendente)}</strong></span>
+                          </div>
+                        </div>
+                        {/* Notas do mês */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full">
+                            <thead>
+                              <tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                                <Th>Fornecedor</Th><Th>CNPJ</Th><Th>Nº NF</Th><Th>Emissão</Th>
+                                <Th right>Valor NF</Th><Th right>Pago</Th><Th right>Pendente</Th><Th>Status</Th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {g.notas.map((inv) => {
+                                const pago = pagoPorNota[inv.id] || 0;
+                                const pendente = Math.max(0, inv.valor - pago);
+                                const status = pago <= 0.005 ? "Em aberto" : pendente <= 0.005 ? "Paga" : "Parcial";
+                                return (
+                                  <tr key={inv.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+                                    <Td>{inv.fornecedor}</Td>
+                                    <Td mono>{inv.cnpj || "—"}</Td>
+                                    <Td mono>{inv.numero}</Td>
+                                    <Td mono>{fmtData(inv.dataEmissao)}</Td>
+                                    <Td right mono>{fmtBRL(inv.valor)}</Td>
+                                    <Td right mono>{fmtBRL(pago)}</Td>
+                                    <Td right>
+                                      <span className="font-mono tabular-nums text-sm" style={{ color: pendente > 0.005 ? C.red : C.green }}>
+                                        {fmtBRL(pendente)}
+                                      </span>
+                                    </Td>
+                                    <Td>
+                                      <Chip tone={status === "Paga" ? "green" : status === "Parcial" ? "amber" : "red"}>
+                                        {status}
+                                      </Chip>
+                                    </Td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ---- SEM NF AGRUPADO ---- */}
           {tab === "semNFAgrupado" && (
             <div className="space-y-4">
@@ -1560,6 +1842,75 @@ export default function ConciliacaoFiscal({ onLogout }) {
                       }}
                     >
                       Vincular e remover
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal duplicados de extrato */}
+      {duplicadosPendentes.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 overflow-y-auto" style={{ background: "rgba(0,0,0,0.6)" }}>
+          <div className="rounded-xl w-full max-w-3xl my-4" style={{ background: C.card }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between p-4" style={{ borderBottom: `1px solid ${C.line}` }}>
+              <div>
+                <h2 className="text-lg font-bold">Lançamentos duplicados encontrados</h2>
+                <p className="text-sm mt-0.5" style={{ color: C.inkSoft }}>
+                  Estes lançamentos já existem no extrato (mesma data, valor e descrição). Escolha o que fazer com cada um.
+                </p>
+              </div>
+              <div className="flex gap-2 ml-4 shrink-0">
+                <button
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                  style={{ background: C.greenSoft, color: C.green }}
+                  onClick={() => {
+                    setPayments((prev) => [...prev, ...duplicadosPendentes.map((d) => d.registro)]);
+                    setDuplicadosPendentes([]);
+                  }}
+                >
+                  Incluir todos
+                </button>
+                <button
+                  className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                  style={{ background: C.redSoft, color: C.red }}
+                  onClick={() => setDuplicadosPendentes([])}
+                >
+                  Ignorar todos
+                </button>
+              </div>
+            </div>
+            <div className="p-4 space-y-2 overflow-y-auto" style={{ maxHeight: "70vh" }}>
+              {duplicadosPendentes.map((d, idx) => (
+                <div key={d.registro.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3"
+                  style={{ border: `1px solid ${C.line}`, background: C.bg }}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="font-mono tabular-nums" style={{ color: C.inkSoft }}>{fmtData(d.registro.data)}</span>
+                      <span className="font-semibold truncate">{d.registro.descricao || "(sem descrição)"}</span>
+                    </div>
+                    <div className="text-xs mt-0.5" style={{ color: C.inkSoft }}>{d.arquivo}</div>
+                  </div>
+                  <span className="font-mono font-bold tabular-nums" style={{ color: C.ink }}>{fmtBRL(d.registro.valor)}</span>
+                  <div className="flex gap-2">
+                    <button
+                      className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                      style={{ background: C.greenSoft, color: C.green }}
+                      onClick={() => {
+                        setPayments((prev) => [...prev, d.registro]);
+                        setDuplicadosPendentes((prev) => prev.filter((_, i) => i !== idx));
+                      }}
+                    >
+                      Incluir
+                    </button>
+                    <button
+                      className="text-xs font-bold px-3 py-1.5 rounded-lg"
+                      style={{ background: C.redSoft, color: C.red }}
+                      onClick={() => setDuplicadosPendentes((prev) => prev.filter((_, i) => i !== idx))}
+                    >
+                      Ignorar
                     </button>
                   </div>
                 </div>
