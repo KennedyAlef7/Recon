@@ -60,8 +60,11 @@ const parseValorInput = (s) => {
   return isNaN(n) ? 0 : n;
 };
 
+const norm = (s) =>
+  (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
 // ---------- Formulário de Fornecedor ----------
-function FormFornecedor({ inicial, onSalvar, onCancelar }) {
+function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
   const [nome, setNome] = useState(inicial?.nome || "");
   const [cnpj, setCnpj] = useState(inicial?.cnpj || "");
   const [categoria, setCategoria] = useState(inicial?.categoria || "");
@@ -69,6 +72,39 @@ function FormFornecedor({ inicial, onSalvar, onCancelar }) {
   const [descontos, setDescontos] = useState(inicial?.descontos || []);
   const [novoDescDesc, setNovoDescDesc] = useState("");
   const [novoDescVal, setNovoDescVal] = useState("");
+  const [dropdownAberto, setDropdownAberto] = useState(false);
+  const inputNomeRef = useRef(null);
+  const dropdownRef = useRef(null);
+
+  // Filtra sugestões pelo texto digitado
+  const sugestoesFiltradas = useMemo(() => {
+    if (!nome.trim()) return sugestoes;
+    const q = norm(nome);
+    return sugestoes.filter((s) => norm(s.fornecedor).includes(q));
+  }, [nome, sugestoes]);
+
+  // Fecha dropdown ao clicar fora
+  useEffect(() => {
+    function handler(e) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target) &&
+          inputNomeRef.current && !inputNomeRef.current.contains(e.target)) {
+        setDropdownAberto(false);
+      }
+    }
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  function importarSugestao(s) {
+    setNome(s.fornecedor);
+    setCnpj(s.cnpj || "");
+    setDropdownAberto(false);
+    // foca no campo de valor bruto para o usuário completar
+    setTimeout(() => {
+      const el = document.getElementById("campo-valor-bruto");
+      if (el) el.focus();
+    }, 50);
+  }
 
   const totalDescontos = descontos.reduce((s, d) => s + d.valor, 0);
   const bruto = parseValorInput(valorBruto);
@@ -101,14 +137,67 @@ function FormFornecedor({ inicial, onSalvar, onCancelar }) {
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="md:col-span-2">
-          <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Nome / Razão social *</label>
-          <input
-            className="w-full text-sm rounded-lg px-3 py-2"
-            style={{ border: `1px solid ${C.line}`, background: "#fff" }}
-            value={nome}
-            onChange={(e) => setNome(e.target.value)}
-            placeholder="Ex: Empresa XYZ Ltda"
-          />
+          <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>
+            Nome / Razão social *
+            {sugestoes.length > 0 && (
+              <span className="ml-2 font-normal" style={{ color: C.blue }}>
+                {sugestoes.length} sugestão(ões) da conciliação disponível(is)
+              </span>
+            )}
+          </label>
+          <div style={{ position: "relative" }}>
+            <input
+              ref={inputNomeRef}
+              className="w-full text-sm rounded-lg px-3 py-2"
+              style={{ border: `1px solid ${dropdownAberto && sugestoesFiltradas.length ? C.blue : C.line}`, background: "#fff" }}
+              value={nome}
+              onChange={(e) => { setNome(e.target.value); setDropdownAberto(true); }}
+              onFocus={() => setDropdownAberto(true)}
+              placeholder="Digite ou selecione da conciliação…"
+            />
+            {dropdownAberto && sugestoesFiltradas.length > 0 && (
+              <div
+                ref={dropdownRef}
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  left: 0,
+                  right: 0,
+                  background: C.card,
+                  border: `1px solid ${C.blue}`,
+                  borderRadius: 10,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+                  zIndex: 100,
+                  maxHeight: 260,
+                  overflowY: "auto",
+                }}
+              >
+                <div className="px-3 py-2 text-xs font-semibold uppercase tracking-wide" style={{ color: C.blue, borderBottom: `1px solid ${C.line}` }}>
+                  Fornecedores da conciliação — clique para importar
+                </div>
+                {sugestoesFiltradas.map((s) => (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); importarSugestao(s); }}
+                    style={{ display: "flex", width: "100%", textAlign: "left", padding: "10px 12px", background: "transparent", border: "none", cursor: "pointer", borderBottom: `1px solid ${C.line}`, gap: 12, alignItems: "center" }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = C.blueSoft; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="text-sm font-semibold" style={{ color: C.ink }}>{s.fornecedor}</div>
+                      <div className="text-xs" style={{ color: C.inkSoft }}>
+                        {s.cnpj ? `CNPJ: ${s.cnpj}  ·  ` : ""}{s.notas} nota(s)  ·  Total {fmtBRL(s.totalNotas)}
+                      </div>
+                    </div>
+                    <span className="text-xs font-bold px-2 py-1 rounded-lg" style={{ background: C.blueSoft, color: C.blue, whiteSpace: "nowrap" }}>
+                      Importar
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
         <div>
           <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>CNPJ / CPF</label>
@@ -136,6 +225,7 @@ function FormFornecedor({ inicial, onSalvar, onCancelar }) {
         <div>
           <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Valor bruto mensal (R$)</label>
           <input
+            id="campo-valor-bruto"
             className="w-full text-sm rounded-lg px-3 py-2 font-mono"
             style={{ border: `1px solid ${C.line}`, background: "#fff" }}
             value={valorBruto}
@@ -515,6 +605,28 @@ export default function Financeiro() {
   const totalProvisao = provisaoMes.reduce((s, p) => s + p.provisao, 0);
   const totalNotasMes = provisaoMes.reduce((s, p) => s + p.totalNotasMes, 0);
 
+  // Sugestões: fornecedores do relatório de conciliação ainda não cadastrados em Financeiro
+  const sugestoesConciliacao = useMemo(() => {
+    if (!conciliacaoData?.invoices?.length) return [];
+    // Agrupa notas por CNPJ ou nome (mesmo algoritmo do "Por fornecedor")
+    const grupos = {};
+    conciliacaoData.invoices.forEach((inv) => {
+      const key = inv.cnpj || norm(inv.fornecedor);
+      if (!grupos[key]) grupos[key] = { key, fornecedor: inv.fornecedor, cnpj: inv.cnpj || "", notas: 0, totalNotas: 0 };
+      grupos[key].notas += 1;
+      grupos[key].totalNotas += inv.valor;
+    });
+    // Filtra os que já estão cadastrados (por CNPJ ou nome normalizado)
+    const jaRegistradosCnpj = new Set(fornecedores.map((f) => f.cnpj?.replace(/\D/g, "")).filter(Boolean));
+    const jaRegistradosNome = new Set(fornecedores.map((f) => norm(f.nome)));
+    return Object.values(grupos).filter((g) => {
+      const cnpjLimpo = g.cnpj.replace(/\D/g, "");
+      if (cnpjLimpo && jaRegistradosCnpj.has(cnpjLimpo)) return false;
+      if (jaRegistradosNome.has(norm(g.fornecedor))) return false;
+      return true;
+    }).sort((a, b) => b.totalNotas - a.totalNotas);
+  }, [conciliacaoData, fornecedores]);
+
   // Meses disponíveis para seleção
   const mesesDisponiveis = useMemo(() => {
     const d = new Date();
@@ -598,6 +710,7 @@ export default function Financeiro() {
                 <FormFornecedor
                   onSalvar={salvarFornecedor}
                   onCancelar={() => setCriando(false)}
+                  sugestoes={sugestoesConciliacao}
                 />
               )}
 
@@ -612,6 +725,7 @@ export default function Financeiro() {
                   inicial={editando}
                   onSalvar={salvarFornecedor}
                   onCancelar={() => setEditando(null)}
+                  sugestoes={sugestoesConciliacao}
                 />
               )}
 
