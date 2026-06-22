@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import "./index.css";
+import AppShell from "./AppShell.jsx";
 import ConciliacaoFiscal from "./ConciliacaoFiscal.jsx";
+import Financeiro from "./Financeiro.jsx";
 import Login from "./components/Login.jsx";
 
 function App() {
   const [auth, setAuth] = useState(null); // null = carregando, false = deslogado, true = logado
 
-  // Verifica se já existe uma sessão válida (cookie httpOnly setado pela função /api/login)
   useEffect(() => {
     fetch("/api/session", { credentials: "include" })
       .then((r) => setAuth(r.ok))
@@ -31,7 +32,15 @@ function App() {
 
   if (!auth) return <Login onSuccess={() => setAuth(true)} />;
 
-  return <ConciliacaoFiscal onLogout={handleLogout} />;
+  return (
+    <AppShell onLogout={handleLogout}>
+      {(modulo) => {
+        if (modulo === "conciliacao") return <ConciliacaoFiscal />;
+        if (modulo === "financeiro") return <Financeiro />;
+        return null;
+      }}
+    </AppShell>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
