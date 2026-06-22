@@ -1,6 +1,6 @@
 import { estaAutenticado } from "./_auth.js";
 
-const ALLOWED_KEY = /^conciliacao:/;
+const ALLOWED_KEY = /^(conciliacao|financeiro):/;
 
 async function redisCmd(url, token, command) {
   const r = await fetch(url, {
