@@ -69,6 +69,7 @@ function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
   const [cnpj, setCnpj] = useState(inicial?.cnpj || "");
   const [categoria, setCategoria] = useState(inicial?.categoria || "");
   const [valorBruto, setValorBruto] = useState(inicial ? String(inicial.valorBruto).replace(".", ",") : "");
+  const [chavePix, setChavePix] = useState(inicial?.chavePix || "");
   const [descontos, setDescontos] = useState(inicial?.descontos || []);
   const [novoDescDesc, setNovoDescDesc] = useState("");
   const [novoDescVal, setNovoDescVal] = useState("");
@@ -98,6 +99,7 @@ function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
   function importarSugestao(s) {
     setNome(s.fornecedor);
     setCnpj(s.cnpj || "");
+    setChavePix(s.chavePix || "");
     setDropdownAberto(false);
     // foca no campo de valor bruto para o usuário completar
     setTimeout(() => {
@@ -125,6 +127,7 @@ function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
       id: inicial?.id || uid(),
       nome: nome.trim(),
       cnpj: cnpj.trim(),
+      chavePix: chavePix.trim(),
       categoria: categoria.trim(),
       valorBruto: bruto,
       descontos,
@@ -211,7 +214,17 @@ function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Chave Pix</label>
+          <input
+            className="w-full text-sm rounded-lg px-3 py-2 font-mono"
+            style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+            value={chavePix}
+            onChange={(e) => setChavePix(e.target.value)}
+            placeholder="CPF, CNPJ, e-mail, telefone ou chave aleatória"
+          />
+        </div>
         <div>
           <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Categoria</label>
           <input
@@ -498,7 +511,11 @@ export default function Financeiro() {
   const [criando, setCriando] = useState(false);
   const [modalAjuste, setModalAjuste] = useState(false);
   const [mesSel, setMesSel] = useState(mesAtual());
-  const [conciliacaoData, setConciliacaoData] = useState(null); // dados do módulo de conciliação
+  const [conciliacaoData, setConciliacaoData] = useState(null);
+  const [exportando, setExportando] = useState(false);
+  const [exportStatus, setExportStatus] = useState(null); // { ok, msg, url? }
+  const [modalExport, setModalExport] = useState(false);
+  const [exportMes, setExportMes] = useState(mesAtual());
   const saveTimer = useRef(null);
 
   // Carregar dados
@@ -638,6 +655,45 @@ export default function Financeiro() {
     return meses;
   }, []);
 
+  async function exportarSheets(mes) {
+    setExportando(true);
+    setExportStatus(null);
+    try {
+      const provisao = fornecedores.map((f) => {
+        const totalDescontos = f.descontos.reduce((s, d) => s + d.valor, 0);
+        const ajustesMes = ajustes.filter((a) => a.fornecedorId === f.id && a.mes === mes);
+        const totalDescPontuais = ajustesMes.filter((a) => a.tipo === "desconto").reduce((s, a) => s + a.valor, 0);
+        const totalAbonos = ajustesMes.filter((a) => a.tipo === "abono").reduce((s, a) => s + a.valor, 0);
+        return {
+          nome: f.nome,
+          cnpj: f.cnpj,
+          chavePix: f.chavePix || "",
+          categoria: f.categoria,
+          valorBruto: f.valorBruto,
+          totalDescontos,
+          totalDescPontuais,
+          totalAbonos,
+          provisao: Math.max(0, f.valorBruto - totalDescontos - totalDescPontuais + totalAbonos),
+          ajustes: ajustesMes,
+        };
+      });
+
+      const r = await fetch("/api/sheets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ mes, fornecedores, ajustes, provisao }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `Erro ${r.status}`);
+      setExportStatus({ ok: true, msg: "Planilha atualizada com sucesso!", url: data.url });
+    } catch (e) {
+      setExportStatus({ ok: false, msg: e.message });
+    } finally {
+      setExportando(false);
+    }
+  }
+
   const tabs = [
     ["fornecedores", `Fornecedores (${fornecedores.length})`],
     ["provisao", "Provisão mensal"],
@@ -655,6 +711,16 @@ export default function Financeiro() {
             <h1 className="text-2xl font-bold mt-0.5">Cadastro de fornecedores e provisões</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setModalExport(true)}
+              className="text-xs font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5"
+              style={{ color: C.green, background: C.greenSoft }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/>
+              </svg>
+              Exportar para Google Sheets
+            </button>
             <button
               onClick={() => setModalAjuste(true)}
               className="text-xs font-bold px-3 py-1.5 rounded-lg"
@@ -736,6 +802,7 @@ export default function Financeiro() {
                       <tr style={{ borderBottom: `1px solid ${C.line}` }}>
                         <Th>Nome / Razão social</Th>
                         <Th>CNPJ / CPF</Th>
+                        <Th>Chave Pix</Th>
                         <Th>Categoria</Th>
                         <Th right>Valor bruto</Th>
                         <Th right>(-) Descontos</Th>
@@ -754,6 +821,7 @@ export default function Financeiro() {
                               {f.categoria && <div className="text-xs" style={{ color: C.inkSoft }}>{f.categoria}</div>}
                             </Td>
                             <Td mono>{f.cnpj || "—"}</Td>
+                            <Td mono>{f.chavePix || "—"}</Td>
                             <Td>{f.categoria || "—"}</Td>
                             <Td right mono>{fmtBRL(f.valorBruto)}</Td>
                             <Td right mono>
@@ -792,7 +860,7 @@ export default function Financeiro() {
                     </tbody>
                     <tfoot>
                       <tr style={{ borderTop: `2px solid ${C.line}`, background: C.bg }}>
-                        <Td colSpan={3}><span className="font-bold text-xs uppercase tracking-wide">Total geral</span></Td>
+                        <Td colSpan={4}><span className="font-bold text-xs uppercase tracking-wide">Total geral</span></Td>
                         <Td right mono><span className="font-bold">{fmtBRL(fornecedores.reduce((s, f) => s + f.valorBruto, 0))}</span></Td>
                         <Td right mono><span style={{ color: C.amber }}>({fmtBRL(fornecedores.reduce((s, f) => s + f.descontos.reduce((ss, d) => ss + d.valor, 0), 0))})</span></Td>
                         <Td right mono><span className="font-bold" style={{ color: C.green }}>{fmtBRL(fornecedores.reduce((s, f) => s + Math.max(0, f.valorBruto - f.descontos.reduce((ss, d) => ss + d.valor, 0)), 0))}</span></Td>
@@ -1009,6 +1077,84 @@ export default function Financeiro() {
           onSalvar={handleAjuste}
           onFechar={() => setModalAjuste(false)}
         />
+      )}
+
+      {/* Modal exportar Google Sheets */}
+      {modalExport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.55)" }} onClick={() => { if (!exportando) { setModalExport(false); setExportStatus(null); } }}>
+          <div className="rounded-xl w-full max-w-md" style={{ background: C.card }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4" style={{ borderBottom: `1px solid ${C.line}` }}>
+              <div>
+                <h2 className="font-bold text-base">Exportar para Google Sheets</h2>
+                <p className="text-xs mt-0.5" style={{ color: C.inkSoft }}>A planilha compartilhada será atualizada com os dados abaixo.</p>
+              </div>
+              {!exportando && <button onClick={() => { setModalExport(false); setExportStatus(null); }} style={{ color: C.inkSoft }}>✕</button>}
+            </div>
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Mês de referência da provisão</label>
+                <select
+                  className="w-full text-sm rounded-lg px-3 py-2"
+                  style={{ border: `1px solid ${C.line}`, background: "#fff" }}
+                  value={exportMes}
+                  onChange={(e) => setExportMes(e.target.value)}
+                  disabled={exportando}
+                >
+                  {mesesDisponiveis.map((m) => (
+                    <option key={m} value={m}>{fmtMes(m)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: C.bg, border: `1px solid ${C.line}` }}>
+                <div className="font-semibold mb-1" style={{ color: C.ink }}>O que será exportado:</div>
+                <div style={{ color: C.inkSoft }}>📋 <strong>Aba "Fornecedores"</strong> — lista completa com CNPJ, Chave Pix, valores e descontos</div>
+                <div style={{ color: C.inkSoft }}>📊 <strong>Aba "Provisão {fmtMes(exportMes)}"</strong> — provisão líquida e ajustes do mês</div>
+                <div style={{ color: C.inkSoft }}>🔧 <strong>Aba "Ajustes"</strong> — todos os descontos e abonos registrados</div>
+              </div>
+
+              {exportStatus && (
+                <div
+                  className="rounded-lg p-3 text-sm"
+                  style={{ background: exportStatus.ok ? C.greenSoft : C.redSoft, color: exportStatus.ok ? C.green : C.red }}
+                >
+                  {exportStatus.msg}
+                  {exportStatus.ok && exportStatus.url && (
+                    <div className="mt-2">
+                      <a
+                        href={exportStatus.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold underline"
+                        style={{ color: C.green }}
+                      >
+                        Abrir planilha →
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                onClick={() => exportarSheets(exportMes)}
+                disabled={exportando || fornecedores.length === 0}
+                className="w-full py-2.5 rounded-lg text-sm font-bold text-white disabled:opacity-40 flex items-center justify-center gap-2"
+                style={{ background: C.green }}
+              >
+                {exportando ? (
+                  <>
+                    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Enviando para o Google Sheets…
+                  </>
+                ) : "Exportar agora"}
+              </button>
+
+              {fornecedores.length === 0 && (
+                <p className="text-xs text-center" style={{ color: C.inkSoft }}>Cadastre fornecedores antes de exportar.</p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
