@@ -2,7 +2,8 @@ async function carregar(key, vazio) {
   const r = await fetch(`/api/storage?key=${encodeURIComponent(key)}`, { credentials: "include" });
   if (!r.ok) return vazio;
   const { value } = await r.json();
-  return value ? JSON.parse(value) : vazio;
+  // Mescla com o formato vazio para preencher campos novos ausentes em dados salvos antes deles existirem
+  return value ? { ...vazio, ...JSON.parse(value) } : vazio;
 }
 
 async function salvar(key, valor) {
