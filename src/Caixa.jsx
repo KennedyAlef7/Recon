@@ -175,10 +175,12 @@ function ImportarTab({ caixaData, setCaixaData }) {
           <div className="text-sm font-semibold" style={{ color: C.ink }}>
             Arraste extratos de "{CONTA_LABEL[conta]}" aqui ou clique para selecionar
           </div>
-          <div className="text-xs mt-1">OFX · CSV · XLS/XLSX</div>
+          <div className="text-xs mt-1">
+            {conta === "nubank_caixinha" ? "PDF (Extrato de Rendimentos) · OFX · CSV · XLS/XLSX" : "OFX · CSV · XLS/XLSX"}
+          </div>
         </div>
         <input
-          ref={fileInputRef} type="file" multiple accept=".ofx,.csv,.txt,.xls,.xlsx" className="hidden"
+          ref={fileInputRef} type="file" multiple accept=".ofx,.csv,.txt,.xls,.xlsx,.pdf" className="hidden"
           onChange={(e) => { processarArquivos(e.target.files); e.target.value = ""; }}
         />
       </div>

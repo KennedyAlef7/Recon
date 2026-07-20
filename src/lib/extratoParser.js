@@ -303,9 +303,95 @@ export async function parseXLSXExtrato(file, conta) {
   return { transacoes, saldos };
 }
 
+// ---------- PDF da caixinha (Nubank2) — "Extrato de Rendimentos Caixinhas PJ" ----------
+// Esse extrato só é exportado em PDF (não tem OFX/CSV), então usamos a IA (Claude, via
+// proxy serverless já existente em /api/claude) para ler o documento e estruturar os dados.
+
+const fileToBase64 = (file) =>
+  new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(",")[1]);
+    r.onerror = () => rej(new Error("Falha ao ler arquivo"));
+    r.readAsDataURL(file);
+  });
+
+async function callClaude(content, maxTokens = 2000) {
+  const response = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ max_tokens: maxTokens, messages: [{ role: "user", content }] }),
+  });
+  if (!response.ok) {
+    let msg = `Erro ${response.status} ao chamar a API`;
+    try {
+      const e = await response.json();
+      if (e.error) msg = e.error;
+    } catch (_) { /* ignore */ }
+    throw new Error(msg);
+  }
+  const data = await response.json();
+  return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+}
+
+function parseJSONLoose(text) {
+  const clean = text.replace(/```json|```/g, "").trim();
+  const start = clean.indexOf("{");
+  if (start < 0) throw new Error("Resposta sem JSON");
+  for (let end = clean.length; end > start; end--) {
+    try {
+      return JSON.parse(clean.slice(start, end));
+    } catch (e) { /* tenta um fechamento mais curto */ }
+  }
+  throw new Error("JSON inválido na resposta");
+}
+
+export async function parseCaixinhaPDF(file) {
+  const b64 = await fileToBase64(file);
+  const text = await callClaude([
+    { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } },
+    {
+      type: "text",
+      text:
+        'Este PDF é um "Extrato de Rendimentos - Caixinhas PJ" do Nubank (RDB de uma caixinha empresarial). Extraia: ' +
+        '1) a data final do período (campo "Período: ... a DD MES AAAA"); ' +
+        '2) o "Saldo no final do período" em R$; ' +
+        '3) cada linha da tabela "Transações concluídas" cuja Movimentação seja "Resgate", "Liquidação", "Compra por aplicação" ou similar — ' +
+        'NÃO inclua linhas do tipo "Rendimento até essa data" (é apenas rendimento acumulado ainda não realizado, sem movimentação de caixa). ' +
+        'Para cada transação incluída, use o valor da coluna "Saldo Líquido" (já líquido de IR/IOF). Classifique "Resgate" e "Liquidação" como tipo "saida" ' +
+        '(dinheiro saindo da caixinha) e "Compra por aplicação" como tipo "entrada" (dinheiro entrando na caixinha). ' +
+        'Responda SOMENTE com JSON compacto, sem markdown, no formato exato: ' +
+        '{"periodoFim":"DD/MM/AAAA","saldoFinalPeriodo":0.00,"transacoes":[{"data":"DD/MM/AAAA","tipo":"entrada|saida","valorLiquido":0.00,"descricao":"texto da movimentação"}]}',
+    },
+  ]);
+  const json = parseJSONLoose(text);
+
+  const periodoFimISO = parseDataBR(json.periodoFim);
+  const saldos = periodoFimISO
+    ? [{ conta: "nubank_caixinha", data: periodoFimISO, saldo: parseValor(json.saldoFinalPeriodo), arquivo: file.name }]
+    : [];
+
+  const transacoes = (json.transacoes || [])
+    .map((t) => {
+      const data = parseDataBR(t.data);
+      const valorAbs = Math.abs(parseValor(t.valorLiquido));
+      const valorComSinal = t.tipo === "saida" ? -valorAbs : valorAbs;
+      return novaTransacao({ conta: "nubank_caixinha", data, descricao: t.descricao || t.tipo, valorComSinal, arquivo: file.name });
+    })
+    .filter(Boolean);
+
+  return { transacoes, saldos };
+}
+
 // ---------- Entrada única: escolhe o parser pela extensão ----------
 export async function parseExtrato(file, conta) {
   validarConta(conta);
+  if (/\.pdf$/i.test(file.name)) {
+    if (conta !== "nubank_caixinha") {
+      throw new Error('PDF só é suportado para o extrato da caixinha ("Nubank2"). Para Itaú/Nubank use OFX, CSV ou XLS/XLSX.');
+    }
+    return parseCaixinhaPDF(file);
+  }
   if (/\.ofx$/i.test(file.name)) {
     return parseOFXExtrato(await fileToTextAuto(file), conta, file.name);
   }
@@ -315,7 +401,7 @@ export async function parseExtrato(file, conta) {
   if (/\.(csv|txt)$/i.test(file.name)) {
     return parseCSVExtrato(await fileToTextAuto(file), conta, file.name);
   }
-  throw new Error("Formato não suportado (use OFX, CSV, XLS ou XLSX)");
+  throw new Error("Formato não suportado (use OFX, CSV, XLS, XLSX ou PDF para a caixinha)");
 }
 
 export const CONTAS = [
