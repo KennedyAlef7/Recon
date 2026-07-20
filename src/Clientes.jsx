@@ -100,6 +100,14 @@ function saldoCaixinhaPorMes(transacoes, saldosConhecidos, meses) {
   return { mapa, ultimo: datas.length ? offset + cumulativoPorData[datas[datas.length - 1]] : offset };
 }
 
+// Rendimento mensal da caixinha (fluxo, não o saldo acumulado) — usado na distribuição por cliente
+function rendimentoCaixinhaPorMes(rendimentosCaixinha, meses) {
+  const mapa = {};
+  rendimentosCaixinha.forEach((r) => { mapa[r.mes] = r.valor; });
+  const total = meses.reduce((s, mes) => s + (mapa[mes] || 0), 0);
+  return { mapa, total };
+}
+
 // ---------- Cadastro ----------
 function FormCliente({ inicial, onSalvar, onCancelar }) {
   const [nome, setNome] = useState(inicial?.nome || "");
@@ -339,7 +347,9 @@ function ClassificarTab({ transacoesElegiveis, clientesData, setClientesData }) 
 }
 
 // ---------- Análise ----------
-function calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, saldoCaixinha) {
+const NOME_CAIXINHA_POOL = "Caixinha (rendimento do mês)";
+
+function calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoCaixinha) {
   const doMes = mes === "total" ? transacoesElegiveis : transacoesElegiveis.filter((t) => t.mes === mes);
   const porCliente = {};
   let naoClassificado = 0;
@@ -352,7 +362,7 @@ function calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clien
     .map((c, idx) => ({ nome: c.nome, valor: porCliente[c.id] || 0, cor: corDoCliente(c, idx) }))
     .filter((f) => f.valor > 0);
   if (naoClassificado > 0.005) fatias.push({ nome: "Não classificado", valor: naoClassificado, cor: COR_NAO_CLASSIFICADO });
-  if (saldoCaixinha > 0.005) fatias.push({ nome: "Caixinha (reserva)", valor: saldoCaixinha, cor: COR_CAIXINHA });
+  if (rendimentoCaixinha > 0.005) fatias.push({ nome: NOME_CAIXINHA_POOL, valor: rendimentoCaixinha, cor: COR_CAIXINHA });
   const total = fatias.reduce((s, f) => s + f.valor, 0);
   return fatias.map((f) => ({ ...f, pct: total > 0 ? (f.valor / total) * 100 : 0 }));
 }
@@ -362,8 +372,14 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
   const meses = useMemo(() => [...new Set(transacoesElegiveis.map((t) => t.mes))].sort(), [transacoesElegiveis]);
   const [mesSel, setMesSel] = useState("total");
 
-  const { mapa: caixinhaPorMes, ultimo: caixinhaAtual } = useMemo(
+  // Saldo (estoque) da caixinha — usado só como linha de referência de liquidez na linha do tempo
+  const { mapa: caixinhaSaldoPorMes } = useMemo(
     () => saldoCaixinhaPorMes(caixaData.transacoes, caixaData.saldosConhecidos, meses),
+    [caixaData, meses]
+  );
+  // Rendimento (fluxo) da caixinha no mês — usado na distribuição por cliente, comparável com o faturamento
+  const { mapa: rendimentoPorMes, total: rendimentoTotal } = useMemo(
+    () => rendimentoCaixinhaPorMes(caixaData.rendimentosCaixinha, meses),
     [caixaData, meses]
   );
 
@@ -373,16 +389,16 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
   })), [meses, transacoesElegiveis]);
 
   const distribuicao = useMemo(() => {
-    const saldoCaixinha = mesSel === "total" ? caixinhaAtual : (caixinhaPorMes[mesSel] || 0);
-    return calcularPool(mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, saldoCaixinha));
-  }, [mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, caixinhaPorMes, caixinhaAtual]);
+    const rendimentoCaixinha = mesSel === "total" ? rendimentoTotal : (rendimentoPorMes[mesSel] || 0);
+    return calcularPool(mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoCaixinha));
+  }, [mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoPorMes, rendimentoTotal]);
 
   const linhaDoTempo = useMemo(() => meses.map((mes) => {
-    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, caixinhaPorMes[mes] || 0));
-    const linha = { mes, caixinhaSaldo: caixinhaPorMes[mes] || 0 };
+    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoPorMes[mes] || 0));
+    const linha = { mes, caixinhaSaldo: caixinhaSaldoPorMes[mes] || 0 };
     pool.forEach((f) => { linha[f.nome] = f.pct; });
     return linha;
-  }), [meses, transacoesElegiveis, classificacoes, ignoradas, clientes, caixinhaPorMes]);
+  }), [meses, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoPorMes, caixinhaSaldoPorMes]);
 
   const seriesLinhaDoTempo = useMemo(() => {
     const nomes = new Set();
@@ -451,7 +467,7 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
             <Legend />
             {seriesLinhaDoTempo.map((nome, i) => (
               <Area key={nome} yAxisId="pct" type="monotone" dataKey={nome} name={nome} stackId="1"
-                fill={clientes.find((c) => c.nome === nome) ? corDoCliente(clientes.find((c) => c.nome === nome), clientes.findIndex((c) => c.nome === nome)) : (nome === "Caixinha (reserva)" ? COR_CAIXINHA : COR_NAO_CLASSIFICADO)}
+                fill={clientes.find((c) => c.nome === nome) ? corDoCliente(clientes.find((c) => c.nome === nome), clientes.findIndex((c) => c.nome === nome)) : (nome === NOME_CAIXINHA_POOL ? COR_CAIXINHA : COR_NAO_CLASSIFICADO)}
                 stroke="none" fillOpacity={0.85} />
             ))}
             <Line yAxisId="valor" type="monotone" dataKey="caixinhaSaldo" name="Caixinha (saldo)" stroke={C.ink} strokeWidth={2} dot={false} />
@@ -465,7 +481,8 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
 function exportarExcel(transacoesElegiveis, clientesData, caixaData) {
   const { clientes, classificacoes, ignoradas } = clientesData;
   const meses = [...new Set(transacoesElegiveis.map((t) => t.mes))].sort();
-  const { mapa: caixinhaPorMes } = saldoCaixinhaPorMes(caixaData.transacoes, caixaData.saldosConhecidos, meses);
+  const { mapa: caixinhaSaldoPorMes } = saldoCaixinhaPorMes(caixaData.transacoes, caixaData.saldosConhecidos, meses);
+  const { mapa: rendimentoPorMes } = rendimentoCaixinhaPorMes(caixaData.rendimentosCaixinha, meses);
 
   const faturamento = meses.map((mes) => ({
     Mês: fmtMes(mes),
@@ -474,15 +491,15 @@ function exportarExcel(transacoesElegiveis, clientesData, caixaData) {
 
   const distribuicaoLinhas = [];
   meses.forEach((mes) => {
-    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, caixinhaPorMes[mes] || 0));
+    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoPorMes[mes] || 0));
     pool.forEach((f) => distribuicaoLinhas.push({ Mês: fmtMes(mes), Cliente: f.nome, Valor: f.valor, "Percentual (%)": f.pct.toFixed(1) }));
   });
 
   const linhaDoTempo = meses.map((mes) => {
-    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, caixinhaPorMes[mes] || 0));
+    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoPorMes[mes] || 0));
     const linha = { Mês: fmtMes(mes) };
     pool.forEach((f) => { linha[f.nome] = f.pct.toFixed(1); });
-    linha["Caixinha (saldo R$)"] = caixinhaPorMes[mes] || 0;
+    linha["Caixinha (saldo R$)"] = caixinhaSaldoPorMes[mes] || 0;
     return linha;
   });
 
@@ -496,7 +513,7 @@ function exportarExcel(transacoesElegiveis, clientesData, caixaData) {
 export default function Clientes() {
   const [tab, setTab] = useState("cadastro");
   const [clientesData, setClientesData] = useState({ clientes: [], classificacoes: {}, ignoradas: [] });
-  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], arquivosImportados: [] });
+  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], arquivosImportados: [] });
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {

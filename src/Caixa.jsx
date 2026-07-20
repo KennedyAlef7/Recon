@@ -106,16 +106,23 @@ function ImportarTab({ caixaData, setCaixaData }) {
       const file = lista[i];
       const entrada = entradas[i];
       try {
-        const { transacoes, saldos } = await parseExtrato(file, conta);
-        if (!transacoes.length) throw new Error("Nenhuma transação reconhecida neste arquivo.");
+        const { transacoes, saldos, rendimentos = [] } = await parseExtrato(file, conta);
+        if (!transacoes.length && !saldos.length && !rendimentos.length) throw new Error("Nenhuma informação reconhecida neste arquivo.");
         setCaixaData((prev) => {
           const idsExistentes = new Set(prev.transacoes.map((t) => t.id));
           const novasTransacoes = transacoes.filter((t) => !idsExistentes.has(t.id));
-          const mesesArquivo = [...new Set(transacoes.map((t) => t.mes))].sort();
+          const mesesArquivo = [...new Set([...transacoes.map((t) => t.mes), ...rendimentos.map((r) => r.mes)])].sort();
+          // um valor de rendimento por mês — reimportar substitui o valor anterior daquele mês
+          const mesesRendimento = new Set(rendimentos.map((r) => r.mes));
+          const rendimentosCaixinha = [
+            ...prev.rendimentosCaixinha.filter((r) => !mesesRendimento.has(r.mes)),
+            ...rendimentos,
+          ];
           const novo = {
             ...prev,
             transacoes: [...prev.transacoes, ...novasTransacoes],
             saldosConhecidos: [...prev.saldosConhecidos, ...saldos],
+            rendimentosCaixinha,
             arquivosImportados: [
               ...prev.arquivosImportados,
               { id: uid(), filename: file.name, conta, meses: mesesArquivo, qtdTransacoes: novasTransacoes.length, importadoEm: new Date().toISOString() },
@@ -138,6 +145,7 @@ function ImportarTab({ caixaData, setCaixaData }) {
         ...prev,
         transacoes: prev.transacoes.filter((t) => !(t.arquivo === registro.filename && t.conta === registro.conta)),
         saldosConhecidos: prev.saldosConhecidos.filter((s) => !(s.arquivo === registro.filename && s.conta === registro.conta)),
+        rendimentosCaixinha: prev.rendimentosCaixinha.filter((r) => r.arquivo !== registro.filename),
         arquivosImportados: prev.arquivosImportados.filter((a) => a.id !== registro.id),
       };
       salvarCaixa(novo);
@@ -367,7 +375,7 @@ function exportarExcel(caixaData, financeiroData) {
 
 export default function Caixa() {
   const [tab, setTab] = useState("importar");
-  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], arquivosImportados: [] });
+  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], arquivosImportados: [] });
   const [financeiroData, setFinanceiroData] = useState({ fornecedores: [], ajustes: [] });
   const [loaded, setLoaded] = useState(false);
 

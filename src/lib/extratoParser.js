@@ -356,12 +356,13 @@ export async function parseCaixinhaPDF(file) {
         'Este PDF é um "Extrato de Rendimentos - Caixinhas PJ" do Nubank (RDB de uma caixinha empresarial). Extraia: ' +
         '1) a data final do período (campo "Período: ... a DD MES AAAA"); ' +
         '2) o "Saldo no final do período" em R$; ' +
-        '3) cada linha da tabela "Transações concluídas" cuja Movimentação seja "Resgate", "Liquidação", "Compra por aplicação" ou similar — ' +
-        'NÃO inclua linhas do tipo "Rendimento até essa data" (é apenas rendimento acumulado ainda não realizado, sem movimentação de caixa). ' +
+        '3) o valor da linha "Rendimento até essa data" (rendimento acumulado do período mostrado no extrato — não é movimentação de caixa, é só o quanto rendeu); ' +
+        '4) cada linha da tabela "Transações concluídas" cuja Movimentação seja "Resgate", "Liquidação", "Compra por aplicação" ou similar — ' +
+        'NÃO inclua a linha "Rendimento até essa data" nessa lista de transações (ela já foi capturada no item 3, não é movimentação de caixa). ' +
         'Para cada transação incluída, use o valor da coluna "Saldo Líquido" (já líquido de IR/IOF). Classifique "Resgate" e "Liquidação" como tipo "saida" ' +
         '(dinheiro saindo da caixinha) e "Compra por aplicação" como tipo "entrada" (dinheiro entrando na caixinha). ' +
         'Responda SOMENTE com JSON compacto, sem markdown, no formato exato: ' +
-        '{"periodoFim":"DD/MM/AAAA","saldoFinalPeriodo":0.00,"transacoes":[{"data":"DD/MM/AAAA","tipo":"entrada|saida","valorLiquido":0.00,"descricao":"texto da movimentação"}]}',
+        '{"periodoFim":"DD/MM/AAAA","saldoFinalPeriodo":0.00,"rendimentoDoPeriodo":0.00,"transacoes":[{"data":"DD/MM/AAAA","tipo":"entrada|saida","valorLiquido":0.00,"descricao":"texto da movimentação"}]}',
     },
   ]);
   const json = parseJSONLoose(text);
@@ -369,6 +370,10 @@ export async function parseCaixinhaPDF(file) {
   const periodoFimISO = parseDataBR(json.periodoFim);
   const saldos = periodoFimISO
     ? [{ conta: "nubank_caixinha", data: periodoFimISO, saldo: parseValor(json.saldoFinalPeriodo), arquivo: file.name }]
+    : [];
+
+  const rendimentos = periodoFimISO && json.rendimentoDoPeriodo != null
+    ? [{ mes: periodoFimISO.slice(0, 7), data: periodoFimISO, valor: parseValor(json.rendimentoDoPeriodo), arquivo: file.name }]
     : [];
 
   const transacoes = (json.transacoes || [])
@@ -380,7 +385,7 @@ export async function parseCaixinhaPDF(file) {
     })
     .filter(Boolean);
 
-  return { transacoes, saldos };
+  return { transacoes, saldos, rendimentos };
 }
 
 // ---------- Entrada única: escolhe o parser pela extensão ----------
