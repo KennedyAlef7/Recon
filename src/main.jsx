@@ -4,6 +4,9 @@ import "./index.css";
 import AppShell from "./AppShell.jsx";
 import ConciliacaoFiscal from "./ConciliacaoFiscal.jsx";
 import Financeiro from "./Financeiro.jsx";
+import Extratos from "./Extratos.jsx";
+import Clientes from "./Clientes.jsx";
+import Caixa from "./Caixa.jsx";
 import Login from "./components/Login.jsx";
 
 function App() {
@@ -37,6 +40,9 @@ function App() {
       {(modulo) => {
         if (modulo === "conciliacao") return <ConciliacaoFiscal />;
         if (modulo === "financeiro") return <Financeiro />;
+        if (modulo === "extratos") return <Extratos />;
+        if (modulo === "clientes") return <Clientes />;
+        if (modulo === "caixa") return <Caixa />;
         return null;
       }}
     </AppShell>
