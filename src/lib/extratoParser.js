@@ -90,7 +90,7 @@ function novaTransacao({ conta, data, descricao, valorComSinal, arquivo }) {
   };
 }
 
-const CONTAS_VALIDAS = ["itau", "nubank", "nubank_caixinha"];
+const CONTAS_VALIDAS = ["itau", "nubank", "nubank_caixinha", "c6_ka2"];
 function validarConta(conta) {
   if (!CONTAS_VALIDAS.includes(conta)) throw new Error(`Conta inválida: ${conta}`);
 }
@@ -388,14 +388,51 @@ export async function parseCaixinhaPDF(file) {
   return { transacoes, saldos, rendimentos };
 }
 
+// ---------- PDF do C6 Bank (conta corrente PJ, ex: KA2) ----------
+// Extrato organizado em seções por mês, com lançamentos diários e checkpoints "Saldo do dia".
+export async function parseC6Extrato(file, conta) {
+  const b64 = await fileToBase64(file);
+  const text = await callClaude([
+    { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } },
+    {
+      type: "text",
+      text:
+        'Este PDF é um "Extrato" de conta corrente PJ do C6 Bank, organizado em seções por mês (ex: "Abril 2026 (01/04/2026 - 30/04/2026)"). ' +
+        'Ignore seções que dizem "Sem lançamentos no mês". Para cada lançamento das seções com movimento (linhas com Data lançamento, Data contábil, Tipo, Descrição, Valor), extraia: ' +
+        'a data completa (use o ano indicado no cabeçalho da seção do mês, formato DD/MM/AAAA), tipo "entrada" (valor positivo, ex: "Entrada PIX") ou "saida" (valor negativo, ex: "Saída PIX" ou "Pagamento" — remova o sinal de menos), valor sempre positivo, e a descrição completa da linha. ' +
+        'Extraia também cada linha "Saldo do dia DD/MM/AA" com seu valor (complete o ano com base no cabeçalho da seção do mês correspondente). ' +
+        'Responda SOMENTE com JSON compacto, sem markdown, no formato exato: ' +
+        '{"transacoes":[{"data":"DD/MM/AAAA","tipo":"entrada|saida","valor":0.00,"descricao":"texto"}],"saldos":[{"data":"DD/MM/AAAA","saldo":0.00}]}',
+    },
+  ], 4000);
+  const json = parseJSONLoose(text);
+
+  const transacoes = (json.transacoes || [])
+    .map((t) => {
+      const data = parseDataBR(t.data);
+      const valorAbs = Math.abs(parseValor(t.valor));
+      const valorComSinal = t.tipo === "saida" ? -valorAbs : valorAbs;
+      return novaTransacao({ conta, data, descricao: t.descricao || "", valorComSinal, arquivo: file.name });
+    })
+    .filter(Boolean);
+
+  const saldos = (json.saldos || [])
+    .map((s) => {
+      const data = parseDataBR(s.data);
+      return data ? { conta, data, saldo: parseValor(s.saldo), arquivo: file.name } : null;
+    })
+    .filter(Boolean);
+
+  return { transacoes, saldos, rendimentos: [] };
+}
+
 // ---------- Entrada única: escolhe o parser pela extensão ----------
 export async function parseExtrato(file, conta) {
   validarConta(conta);
   if (/\.pdf$/i.test(file.name)) {
-    if (conta !== "nubank_caixinha") {
-      throw new Error('PDF só é suportado para o extrato da caixinha ("Nubank2"). Para Itaú/Nubank use OFX, CSV ou XLS/XLSX.');
-    }
-    return parseCaixinhaPDF(file);
+    if (conta === "nubank_caixinha") return parseCaixinhaPDF(file);
+    if (conta === "c6_ka2") return parseC6Extrato(file, conta);
+    throw new Error('PDF só é suportado para a caixinha ("Nubank2") ou para a conta C6 (KA2). Para Itaú/Nubank use OFX, CSV ou XLS/XLSX.');
   }
   if (/\.ofx$/i.test(file.name)) {
     return parseOFXExtrato(await fileToTextAuto(file), conta, file.name);
@@ -406,11 +443,12 @@ export async function parseExtrato(file, conta) {
   if (/\.(csv|txt)$/i.test(file.name)) {
     return parseCSVExtrato(await fileToTextAuto(file), conta, file.name);
   }
-  throw new Error("Formato não suportado (use OFX, CSV, XLS, XLSX ou PDF para a caixinha)");
+  throw new Error("Formato não suportado (use OFX, CSV, XLS, XLSX ou PDF para caixinha/C6)");
 }
 
 export const CONTAS = [
-  { key: "itau", label: "Itaú" },
-  { key: "nubank", label: "Nubank (conta)" },
-  { key: "nubank_caixinha", label: "Nubank2 (caixinha)" },
+  { key: "itau", label: "Itaú", empresa: "DM Tecnologia", cnpj: "51431469000116" },
+  { key: "nubank", label: "Nubank (conta)", empresa: "DM Tecnologia", cnpj: "51431469000116" },
+  { key: "nubank_caixinha", label: "Nubank2 (caixinha)", empresa: "DM Tecnologia", cnpj: "51431469000116" },
+  { key: "c6_ka2", label: "C6 Bank (KA2)", empresa: "KA2", cnpj: "65905415000150" },
 ];

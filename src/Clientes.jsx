@@ -2,9 +2,9 @@ import React, { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
 import {
   ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell,
-  AreaChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
-import { norm } from "./lib/extratoParser.js";
+import { norm, CONTAS } from "./lib/extratoParser.js";
 import { carregarCaixa, carregarClientes, salvarClientes } from "./lib/caixaStore.js";
 
 const C = {
@@ -26,6 +26,15 @@ const C = {
 const PALETA_CLIENTES = ["#0E6B4F", "#1F4E79", "#9A6A12", "#5B2D8E", "#A93226", "#0E7C86", "#8E44AD", "#B7590C", "#2E7D32", "#C2185B"];
 const COR_CAIXINHA = "#94A3B8";
 const COR_NAO_CLASSIFICADO = "#B0B8B5";
+
+// Mapeamento conta bancária -> empresa/CNPJ faturador (ex: contas Itaú/Nubank = DM Tecnologia, C6 = KA2)
+const EMPRESA_POR_CONTA = Object.fromEntries(CONTAS.map((c) => [c.key, { empresa: c.empresa, cnpj: c.cnpj }]));
+const EMPRESAS = [...new Map(CONTAS.map((c) => [c.empresa, c.cnpj])).entries()]; // [[empresa, cnpj], ...] únicos, na ordem de CONTAS
+const PALETA_EMPRESAS = ["#1F4E79", "#0E7C86", "#9A6A12", "#5B2D8E"];
+const fmtCNPJ = (digits) => {
+  const d = (digits || "").replace(/\D/g, "");
+  return d.length === 14 ? d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5") : (digits || "—");
+};
 
 const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v || 0);
 const fmtPct = (v) => `${(v || 0).toFixed(1)}%`;
@@ -383,28 +392,63 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
     [caixaData, meses]
   );
 
+  // Transações realmente contáveis como faturamento — exclui o que foi marcado "Ignorar" na Classificação
+  // (ex: transferências entre contas do próprio grupo, que não são receita de cliente)
+  const transacoesFaturaveis = useMemo(
+    () => transacoesElegiveis.filter((t) => !ignoradas.includes(t.id)),
+    [transacoesElegiveis, ignoradas]
+  );
+
   const faturamentoMensal = useMemo(() => meses.map((mes) => ({
     mes,
-    total: transacoesElegiveis.filter((t) => t.mes === mes).reduce((s, t) => s + t.valor, 0),
-  })), [meses, transacoesElegiveis]);
+    total: transacoesFaturaveis.filter((t) => t.mes === mes).reduce((s, t) => s + t.valor, 0),
+  })), [meses, transacoesFaturaveis]);
+
+  const faturamentoPorEmpresa = useMemo(() => meses.map((mes) => {
+    const linha = { mes };
+    transacoesFaturaveis.filter((t) => t.mes === mes).forEach((t) => {
+      const empresa = EMPRESA_POR_CONTA[t.conta]?.empresa || "Outra";
+      linha[empresa] = (linha[empresa] || 0) + t.valor;
+    });
+    EMPRESAS.forEach(([empresa]) => { if (!(empresa in linha)) linha[empresa] = 0; });
+    return linha;
+  }), [meses, transacoesFaturaveis]);
+
+  const temMultiplasEmpresas = useMemo(
+    () => new Set(transacoesFaturaveis.map((t) => EMPRESA_POR_CONTA[t.conta]?.empresa)).size > 1,
+    [transacoesFaturaveis]
+  );
 
   const distribuicao = useMemo(() => {
     const rendimentoCaixinha = mesSel === "total" ? rendimentoTotal : (rendimentoPorMes[mesSel] || 0);
     return calcularPool(mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoCaixinha));
   }, [mesSel, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoPorMes, rendimentoTotal]);
 
-  const linhaDoTempo = useMemo(() => meses.map((mes) => {
-    const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoPorMes[mes] || 0));
-    const linha = { mes, caixinhaSaldo: caixinhaSaldoPorMes[mes] || 0 };
-    pool.forEach((f) => { linha[f.nome] = f.pct; });
-    return linha;
-  }), [meses, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoPorMes, caixinhaSaldoPorMes]);
+  const linhaDoTempo = useMemo(() => {
+    const linhas = meses.map((mes) => {
+      const pool = calcularPool(mes, transacoesElegiveis, classificacoes, ignoradas, clientes, Math.max(0, rendimentoPorMes[mes] || 0));
+      const linha = { mes, caixinhaSaldo: caixinhaSaldoPorMes[mes] || 0 };
+      pool.forEach((f) => { linha[f.nome] = f.pct; });
+      return linha;
+    });
+    // preenche com 0 as séries ausentes em algum mês — evita barras/quebras incorretas no gráfico
+    const todosNomes = new Set();
+    linhas.forEach((l) => Object.keys(l).forEach((k) => { if (k !== "mes" && k !== "caixinhaSaldo") todosNomes.add(k); }));
+    linhas.forEach((l) => todosNomes.forEach((nome) => { if (!(nome in l)) l[nome] = 0; }));
+    return linhas;
+  }, [meses, transacoesElegiveis, classificacoes, ignoradas, clientes, rendimentoPorMes, caixinhaSaldoPorMes]);
 
   const seriesLinhaDoTempo = useMemo(() => {
     const nomes = new Set();
     linhaDoTempo.forEach((l) => Object.keys(l).forEach((k) => { if (k !== "mes" && k !== "caixinhaSaldo") nomes.add(k); }));
     return [...nomes];
   }, [linhaDoTempo]);
+
+  const corPorNome = (nome) => {
+    const idx = clientes.findIndex((c) => c.nome === nome);
+    if (idx >= 0) return corDoCliente(clientes[idx], idx);
+    return nome === NOME_CAIXINHA_POOL ? COR_CAIXINHA : COR_NAO_CLASSIFICADO;
+  };
 
   if (!meses.length) {
     return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Nenhuma receita de cliente importada ainda — importe extratos no módulo "Caixa" primeiro.</div>;
@@ -424,6 +468,27 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
+
+      {temMultiplasEmpresas && (
+        <div>
+          <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Faturamento mensal por empresa (CNPJ)</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={faturamentoPorEmpresa}>
+              <CartesianGrid strokeDasharray="3 3" stroke={C.line} />
+              <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
+              <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
+              <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
+              <Legend verticalAlign="top" height={32} wrapperStyle={{ fontSize: 12 }} />
+              {EMPRESAS.map(([empresa], i) => (
+                <Bar key={empresa} dataKey={empresa} name={empresa} stackId="empresa" fill={PALETA_EMPRESAS[i % PALETA_EMPRESAS.length]} stroke={C.card} strokeWidth={2} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+          <div className="text-xs mt-1" style={{ color: C.inkSoft }}>
+            {EMPRESAS.map(([empresa, cnpj]) => `${empresa} — CNPJ ${fmtCNPJ(cnpj)}`).join(" · ")}
+          </div>
+        </div>
+      )}
 
       <div>
         <div className="flex items-center justify-between mb-2">
@@ -456,22 +521,29 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
       </div>
 
       <div>
-        <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Linha do tempo — distribuição por cliente e liquidez da caixinha</div>
-        <ResponsiveContainer width="100%" height={300}>
-          <AreaChart data={linhaDoTempo}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.line} />
+        <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Linha do tempo — distribuição por cliente</div>
+        <ResponsiveContainer width="100%" height={320}>
+          <BarChart data={linhaDoTempo} margin={{ top: 8 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
             <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
-            <YAxis yAxisId="pct" tickFormatter={(v) => `${v}%`} fontSize={11} width={45} />
-            <YAxis yAxisId="valor" orientation="right" tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
-            <Tooltip formatter={(v, name) => name === "Caixinha (saldo)" ? fmtBRL(v) : fmtPct(v)} labelFormatter={fmtMes} />
-            <Legend />
-            {seriesLinhaDoTempo.map((nome, i) => (
-              <Area key={nome} yAxisId="pct" type="monotone" dataKey={nome} name={nome} stackId="1"
-                fill={clientes.find((c) => c.nome === nome) ? corDoCliente(clientes.find((c) => c.nome === nome), clientes.findIndex((c) => c.nome === nome)) : (nome === NOME_CAIXINHA_POOL ? COR_CAIXINHA : COR_NAO_CLASSIFICADO)}
-                stroke="none" fillOpacity={0.85} />
+            <YAxis tickFormatter={(v) => `${v}%`} domain={[0, 100]} fontSize={11} width={45} />
+            <Tooltip formatter={(v) => fmtPct(v)} labelFormatter={fmtMes} />
+            <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: 12 }} />
+            {seriesLinhaDoTempo.map((nome) => (
+              <Bar key={nome} dataKey={nome} name={nome} stackId="pool" fill={corPorNome(nome)} stroke={C.card} strokeWidth={2} />
             ))}
-            <Line yAxisId="valor" type="monotone" dataKey="caixinhaSaldo" name="Caixinha (saldo)" stroke={C.ink} strokeWidth={2} dot={false} />
-          </AreaChart>
+          </BarChart>
+        </ResponsiveContainer>
+
+        <div className="text-xs font-semibold mt-4 mb-1" style={{ color: C.inkSoft }}>Liquidez da caixinha (saldo, R$)</div>
+        <ResponsiveContainer width="100%" height={140}>
+          <LineChart data={linhaDoTempo} margin={{ top: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
+            <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={11} />
+            <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={10} width={85} />
+            <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
+            <Line type="monotone" dataKey="caixinhaSaldo" name="Caixinha (saldo)" stroke={C.ink} strokeWidth={2} dot={false} />
+          </LineChart>
         </ResponsiveContainer>
       </div>
     </div>
@@ -480,14 +552,25 @@ function AnaliseTab({ transacoesElegiveis, clientesData, caixaData }) {
 
 function exportarExcel(transacoesElegiveis, clientesData, caixaData) {
   const { clientes, classificacoes, ignoradas } = clientesData;
+  const transacoesFaturaveis = transacoesElegiveis.filter((t) => !ignoradas.includes(t.id));
   const meses = [...new Set(transacoesElegiveis.map((t) => t.mes))].sort();
   const { mapa: caixinhaSaldoPorMes } = saldoCaixinhaPorMes(caixaData.transacoes, caixaData.saldosConhecidos, meses);
   const { mapa: rendimentoPorMes } = rendimentoCaixinhaPorMes(caixaData.rendimentosCaixinha, meses);
 
   const faturamento = meses.map((mes) => ({
     Mês: fmtMes(mes),
-    Faturamento: transacoesElegiveis.filter((t) => t.mes === mes).reduce((s, t) => s + t.valor, 0),
+    Faturamento: transacoesFaturaveis.filter((t) => t.mes === mes).reduce((s, t) => s + t.valor, 0),
   }));
+
+  const porEmpresaLinhas = meses.map((mes) => {
+    const linha = { Mês: fmtMes(mes) };
+    transacoesFaturaveis.filter((t) => t.mes === mes).forEach((t) => {
+      const empresa = EMPRESA_POR_CONTA[t.conta]?.empresa || "Outra";
+      linha[empresa] = (linha[empresa] || 0) + t.valor;
+    });
+    EMPRESAS.forEach(([empresa]) => { if (!(empresa in linha)) linha[empresa] = 0; });
+    return linha;
+  });
 
   const distribuicaoLinhas = [];
   meses.forEach((mes) => {
@@ -505,6 +588,7 @@ function exportarExcel(transacoesElegiveis, clientesData, caixaData) {
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(faturamento), "Faturamento Mensal");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(porEmpresaLinhas), "Faturamento por Empresa");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(distribuicaoLinhas), "Distribuição por Cliente");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(linhaDoTempo), "Linha do Tempo");
   XLSX.writeFile(wb, `clientes_${new Date().toISOString().slice(0, 10)}.xlsx`);
@@ -526,7 +610,7 @@ export default function Clientes() {
   }, []);
 
   const transacoesElegiveis = useMemo(
-    () => caixaData.transacoes.filter((t) => t.tipo === "credito" && (t.conta === "itau" || t.conta === "nubank")),
+    () => caixaData.transacoes.filter((t) => t.tipo === "credito" && (t.conta === "itau" || t.conta === "nubank" || t.conta === "c6_ka2")),
     [caixaData]
   );
 

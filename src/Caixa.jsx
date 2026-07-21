@@ -24,7 +24,7 @@ const C = {
   purple: "#5B2D8E",
 };
 
-const CONTA_COR = { itau: C.blue, nubank: C.purple, nubank_caixinha: "#C2185B" };
+const CONTA_COR = { itau: C.blue, nubank: C.purple, nubank_caixinha: "#C2185B", c6_ka2: "#0E7C86" };
 const CONTA_LABEL = Object.fromEntries(CONTAS.map((c) => [c.key, c.label]));
 
 const fmtBRL = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(v || 0);
@@ -184,7 +184,9 @@ function ImportarTab({ caixaData, setCaixaData }) {
             Arraste extratos de "{CONTA_LABEL[conta]}" aqui ou clique para selecionar
           </div>
           <div className="text-xs mt-1">
-            {conta === "nubank_caixinha" ? "PDF (Extrato de Rendimentos) · OFX · CSV · XLS/XLSX" : "OFX · CSV · XLS/XLSX"}
+            {conta === "nubank_caixinha" ? "PDF (Extrato de Rendimentos) · OFX · CSV · XLS/XLSX"
+              : conta === "c6_ka2" ? "PDF (Extrato C6) · OFX · CSV · XLS/XLSX"
+              : "OFX · CSV · XLS/XLSX"}
           </div>
         </div>
         <input
@@ -275,11 +277,12 @@ function EvolucaoTab({ caixaData }) {
 }
 
 // ---------- Margem líquida ----------
-function calcularMargem(caixaData, financeiroData) {
+function calcularMargem(caixaData, financeiroData, ignoradas) {
   const receitaPorMes = {};
   const despesaExtratoPorMes = {};
   caixaData.transacoes.forEach((t) => {
     if (t.conta === "nubank_caixinha") return; // movimentos internos da caixinha não são receita/despesa
+    if (ignoradas.has(t.id)) return; // marcado como não-receita na classificação por cliente (ex: transferência entre contas do grupo)
     if (t.tipo === "credito") receitaPorMes[t.mes] = (receitaPorMes[t.mes] || 0) + t.valor;
     else despesaExtratoPorMes[t.mes] = (despesaExtratoPorMes[t.mes] || 0) + t.valor;
   });
@@ -303,8 +306,8 @@ function calcularMargem(caixaData, financeiroData) {
   });
 }
 
-function MargemTab({ caixaData, financeiroData }) {
-  const dados = useMemo(() => calcularMargem(caixaData, financeiroData), [caixaData, financeiroData]);
+function MargemTab({ caixaData, financeiroData, ignoradas }) {
+  const dados = useMemo(() => calcularMargem(caixaData, financeiroData, ignoradas), [caixaData, financeiroData, ignoradas]);
 
   if (!dados.length) {
     return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Importe extratos para calcular a margem líquida mensal.</div>;
@@ -354,10 +357,10 @@ function MargemTab({ caixaData, financeiroData }) {
   );
 }
 
-function exportarExcel(caixaData, financeiroData) {
+function exportarExcel(caixaData, financeiroData, ignoradas) {
   const semCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank"]);
   const comCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank", "nubank_caixinha"]);
-  const margem = calcularMargem(caixaData, financeiroData);
+  const margem = calcularMargem(caixaData, financeiroData, ignoradas);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(semCaixinha.map((l) => ({
@@ -377,13 +380,15 @@ export default function Caixa() {
   const [tab, setTab] = useState("importar");
   const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], arquivosImportados: [] });
   const [financeiroData, setFinanceiroData] = useState({ fornecedores: [], ajustes: [] });
+  const [ignoradas, setIgnoradas] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const [c, f] = await Promise.all([carregarCaixa(), carregarFinanceiro()]);
+      const [c, f, cl] = await Promise.all([carregarCaixa(), carregarFinanceiro(), carregarClientes()]);
       setCaixaData(c);
       setFinanceiroData(f);
+      setIgnoradas(new Set(cl.ignoradas));
       setLoaded(true);
     })();
   }, []);
@@ -409,7 +414,7 @@ export default function Caixa() {
             <h1 className="text-2xl font-bold mt-0.5">Evolução de caixa e margem líquida</h1>
           </div>
           <button
-            onClick={() => exportarExcel(caixaData, financeiroData)}
+            onClick={() => exportarExcel(caixaData, financeiroData, ignoradas)}
             disabled={!totalTransacoes}
             className="text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-40"
             style={{ color: C.green, background: C.greenSoft }}
@@ -451,7 +456,7 @@ export default function Caixa() {
             <>
               {tab === "importar" && <ImportarTab caixaData={caixaData} setCaixaData={setCaixaData} />}
               {tab === "evolucao" && <EvolucaoTab caixaData={caixaData} />}
-              {tab === "margem" && <MargemTab caixaData={caixaData} financeiroData={financeiroData} />}
+              {tab === "margem" && <MargemTab caixaData={caixaData} financeiroData={financeiroData} ignoradas={ignoradas} />}
             </>
           )}
         </div>
