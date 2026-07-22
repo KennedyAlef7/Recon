@@ -35,6 +35,21 @@ const fmtMes = (ym) => {
   return `${MESES_LABEL[parseInt(m, 10) - 1]}/${y}`;
 };
 
+// Gera todas as chaves "YYYY-MM" entre início e fim, inclusive, preenchendo meses sem lançamento
+function gerarFaixaMeses(inicio, fim) {
+  const meses = [];
+  let [ano, mes] = inicio.split("-").map(Number);
+  const [anoFim, mesFim] = fim.split("-").map(Number);
+  while (ano < anoFim || (ano === anoFim && mes <= mesFim)) {
+    meses.push(`${ano}-${String(mes).padStart(2, "0")}`);
+    mes++;
+    if (mes > 12) { mes = 1; ano++; }
+  }
+  return meses;
+}
+
+const MES_INICIO_HISTORICO = "2025-11";
+
 // Formata tanto chave de mês ("2026-06") quanto de trimestre ("2026-Q2")
 const fmtPeriodo = (chave) => {
   if (!chave || chave === "total") return "Total do período";
@@ -125,6 +140,34 @@ export default function Resultados() {
       ? { receita: d.receita, despesa: d.despesaFinanceiro, margem: d.margem, margemPct: d.margemPct, diferenca: d.diferenca }
       : { receita: 0, despesa: 0, margem: 0, margemPct: 0, diferenca: 0 };
   }, [dadosExibidos, mesSel]);
+
+  // Evolução de despesas por categoria — sempre mensal (independe do toggle Mensal/Trimestral) e numa
+  // faixa fixa de meses (preenche com zero os meses sem lançamento) para dar para ver quando uma categoria começou a subir.
+  const evolucaoDespesas = useMemo(() => {
+    if (!dados.length) return [];
+    const ultimoMes = dados[dados.length - 1].mes;
+    const inicio = MES_INICIO_HISTORICO < ultimoMes ? MES_INICIO_HISTORICO : ultimoMes;
+    const porMes = Object.fromEntries(dados.map((d) => [d.mes, d]));
+    return gerarFaixaMeses(inicio, ultimoMes).map((mes) => {
+      const d = porMes[mes];
+      const linha = { mes, total: d ? d.despesaFinanceiro : 0 };
+      categoriasUnicas.forEach((cat) => { linha[cat] = d ? (d.porCategoria[cat] || 0) : 0; });
+      return linha;
+    });
+  }, [dados, categoriasUnicas]);
+
+  // Categoria que mais cresceu do primeiro para o último mês da faixa — o "ofensor" que apareceu/aumentou
+  const maiorAumento = useMemo(() => {
+    if (evolucaoDespesas.length < 2) return null;
+    const primeiro = evolucaoDespesas[0];
+    const ultimo = evolucaoDespesas[evolucaoDespesas.length - 1];
+    let maior = null;
+    categoriasUnicas.forEach((cat) => {
+      const delta = (ultimo[cat] || 0) - (primeiro[cat] || 0);
+      if (!maior || delta > maior.delta) maior = { categoria: cat, delta, de: primeiro[cat] || 0, para: ultimo[cat] || 0 };
+    });
+    return maior && maior.delta > 0.01 ? maior : null;
+  }, [evolucaoDespesas, categoriasUnicas]);
 
   const rankingCategorias = useMemo(() => {
     const linhas = mesSel === "total" ? dadosExibidos : dadosExibidos.filter((d) => d.mes === mesSel);
@@ -224,6 +267,30 @@ export default function Resultados() {
                     <Bar key={cat} dataKey={cat} name={cat} stackId="despesa" fill={corPorCategoria(cat)} stroke={C.card} strokeWidth={2} />
                   ))}
                   <Line type="monotone" dataKey="receita" name="Receita" stroke={C.green} strokeWidth={3} dot={{ r: 3 }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="mt-8">
+              <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>
+                Evolução de despesas por categoria ({fmtMes(evolucaoDespesas[0]?.mes)} – {fmtMes(evolucaoDespesas[evolucaoDespesas.length - 1]?.mes)})
+              </div>
+              {maiorAumento && (
+                <div className="text-xs mb-2 px-3 py-2 rounded-lg" style={{ background: C.amberSoft, color: C.amber }}>
+                  Maior aumento no período: <strong>{maiorAumento.categoria}</strong> foi de {fmtBRL(maiorAumento.de)} para {fmtBRL(maiorAumento.para)} (+{fmtBRL(maiorAumento.delta)}) — esse é o principal ofensor novo/crescente de despesa.
+                </div>
+              )}
+              <ResponsiveContainer width="100%" height={300}>
+                <ComposedChart data={evolucaoDespesas} margin={{ top: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
+                  <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
+                  <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
+                  <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
+                  <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: 12 }} />
+                  {categoriasUnicas.map((cat) => (
+                    <Bar key={cat} dataKey={cat} name={cat} stackId="despesa" fill={corPorCategoria(cat)} stroke={C.card} strokeWidth={2} />
+                  ))}
+                  <Line type="monotone" dataKey="total" name="Despesa total" stroke={C.ink} strokeWidth={2.5} dot={{ r: 3 }} />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
