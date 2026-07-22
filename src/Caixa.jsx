@@ -292,8 +292,11 @@ function debitosDoMes(caixaData, mes) {
     .sort((a, b) => b.valor - a.valor);
 }
 
-function MargemTab({ caixaData, financeiroData, ignoradas }) {
-  const dados = useMemo(() => calcularResultadoMensal(caixaData, financeiroData, ignoradas), [caixaData, financeiroData, ignoradas]);
+function MargemTab({ caixaData, financeiroData, ignoradas, debitosIgnorados, onToggleDebito }) {
+  const dados = useMemo(
+    () => calcularResultadoMensal(caixaData, financeiroData, ignoradas, debitosIgnorados),
+    [caixaData, financeiroData, ignoradas, debitosIgnorados]
+  );
   const [mesExpandido, setMesExpandido] = useState(null);
 
   if (!dados.length) {
@@ -356,16 +359,26 @@ function MargemTab({ caixaData, financeiroData, ignoradas }) {
                           <div className="text-xs py-3 text-center" style={{ color: C.inkSoft }}>Nenhum débito neste mês.</div>
                         ) : (
                           <div className="rounded-lg overflow-hidden mt-2" style={{ border: `1px solid ${C.line}` }}>
-                            {debitos.map((t, idx) => (
-                              <div key={t.id} className="flex items-center gap-3 px-3 py-2 text-xs" style={{ background: C.card, borderTop: idx ? `1px solid ${C.line}` : "none" }}>
-                                <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: `${CONTA_COR[t.conta]}22`, color: CONTA_COR[t.conta] }}>
-                                  {CONTA_LABEL[t.conta]}
-                                </span>
-                                <span style={{ color: C.inkSoft, width: 60 }}>{t.data?.split("-").reverse().join("/")}</span>
-                                <span className="flex-1 truncate">{t.descricao}</span>
-                                <span className="font-mono font-bold" style={{ color: C.red }}>{fmtBRL(t.valor)}</span>
-                              </div>
-                            ))}
+                            {debitos.map((t, idx) => {
+                              const ignorado = debitosIgnorados.has(t.id);
+                              return (
+                                <div key={t.id} className="flex items-center gap-3 px-3 py-2 text-xs" style={{ background: C.card, borderTop: idx ? `1px solid ${C.line}` : "none", opacity: ignorado ? 0.5 : 1 }}>
+                                  <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: `${CONTA_COR[t.conta]}22`, color: CONTA_COR[t.conta] }}>
+                                    {CONTA_LABEL[t.conta]}
+                                  </span>
+                                  <span style={{ color: C.inkSoft, width: 60 }}>{t.data?.split("-").reverse().join("/")}</span>
+                                  <span className="flex-1 truncate" style={{ textDecoration: ignorado ? "line-through" : "none" }}>{t.descricao}</span>
+                                  <span className="font-mono font-bold" style={{ color: ignorado ? C.inkSoft : C.red }}>{fmtBRL(t.valor)}</span>
+                                  <button
+                                    onClick={() => onToggleDebito(t.id)}
+                                    className="text-xs px-2 py-1 rounded-lg flex-shrink-0"
+                                    style={ignorado ? { color: C.blue, background: C.blueSoft } : { color: C.inkSoft, background: "#EEF1F0" }}
+                                  >
+                                    {ignorado ? "Reverter" : "Ignorar"}
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </td>
@@ -378,15 +391,15 @@ function MargemTab({ caixaData, financeiroData, ignoradas }) {
         </table>
       </div>
       <div className="text-xs" style={{ color: C.inkSoft }}>
-        "Ver débitos" mostra todos os débitos do extrato (Itaú, Nubank e C6/KA2) daquele mês, do maior para o menor — use para achar o que ainda falta cadastrar como fornecedor no Financeiro.
+        "Ver débitos" mostra todos os débitos do extrato (Itaú, Nubank e C6/KA2) daquele mês, do maior para o menor. Use "Ignorar" para tirar movimentos internos (ex: aplicação na caixinha) da conferência, ou cadastre o fornecedor correspondente no Financeiro.
       </div>
     </div>
   );
 }
 
-function exportarExcel(caixaData, financeiroData, ignoradas) {
+function exportarExcel(caixaData, financeiroData, ignoradas, debitosIgnorados) {
   const patrimonio = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, CONTAS_PATRIMONIO);
-  const margem = calcularResultadoMensal(caixaData, financeiroData, ignoradas);
+  const margem = calcularResultadoMensal(caixaData, financeiroData, ignoradas, debitosIgnorados);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(patrimonio.map((l) => ({
@@ -401,7 +414,7 @@ function exportarExcel(caixaData, financeiroData, ignoradas) {
 
 export default function Caixa() {
   const [tab, setTab] = useState("importar");
-  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], arquivosImportados: [] });
+  const [caixaData, setCaixaData] = useState({ transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], debitosIgnorados: [], arquivosImportados: [] });
   const [financeiroData, setFinanceiroData] = useState({ fornecedores: [], ajustes: [] });
   const [ignoradas, setIgnoradas] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
@@ -415,6 +428,20 @@ export default function Caixa() {
       setLoaded(true);
     })();
   }, []);
+
+  const debitosIgnorados = useMemo(() => new Set(caixaData.debitosIgnorados), [caixaData.debitosIgnorados]);
+
+  function toggleDebitoIgnorado(id) {
+    setCaixaData((prev) => {
+      const jaIgnorado = prev.debitosIgnorados.includes(id);
+      const novo = {
+        ...prev,
+        debitosIgnorados: jaIgnorado ? prev.debitosIgnorados.filter((x) => x !== id) : [...prev.debitosIgnorados, id],
+      };
+      salvarCaixa(novo);
+      return novo;
+    });
+  }
 
   const totalTransacoes = caixaData.transacoes.length;
   const saldoAtualTotal = useMemo(() => {
@@ -437,7 +464,7 @@ export default function Caixa() {
             <h1 className="text-2xl font-bold mt-0.5">Evolução de caixa e margem líquida</h1>
           </div>
           <button
-            onClick={() => exportarExcel(caixaData, financeiroData, ignoradas)}
+            onClick={() => exportarExcel(caixaData, financeiroData, ignoradas, debitosIgnorados)}
             disabled={!totalTransacoes}
             className="text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-40"
             style={{ color: C.green, background: C.greenSoft }}
@@ -479,7 +506,7 @@ export default function Caixa() {
             <>
               {tab === "importar" && <ImportarTab caixaData={caixaData} setCaixaData={setCaixaData} />}
               {tab === "evolucao" && <EvolucaoTab caixaData={caixaData} />}
-              {tab === "margem" && <MargemTab caixaData={caixaData} financeiroData={financeiroData} ignoradas={ignoradas} />}
+              {tab === "margem" && <MargemTab caixaData={caixaData} financeiroData={financeiroData} ignoradas={ignoradas} debitosIgnorados={debitosIgnorados} onToggleDebito={toggleDebitoIgnorado} />}
             </>
           )}
         </div>

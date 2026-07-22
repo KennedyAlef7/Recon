@@ -87,9 +87,11 @@ export default function Resultados() {
     })();
   }, []);
 
+  const debitosIgnorados = useMemo(() => new Set(caixaData.debitosIgnorados), [caixaData.debitosIgnorados]);
+
   const dados = useMemo(
-    () => calcularResultadoMensal(caixaData, financeiroData, ignoradas),
-    [caixaData, financeiroData, ignoradas]
+    () => calcularResultadoMensal(caixaData, financeiroData, ignoradas, debitosIgnorados),
+    [caixaData, financeiroData, ignoradas, debitosIgnorados]
   );
 
   const dadosExibidos = useMemo(

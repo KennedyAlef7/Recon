@@ -15,7 +15,7 @@ async function salvar(key, valor) {
   });
 }
 
-const CAIXA_VAZIO = { transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], arquivosImportados: [] };
+const CAIXA_VAZIO = { transacoes: [], saldosConhecidos: [], rendimentosCaixinha: [], debitosIgnorados: [], arquivosImportados: [] };
 const CLIENTES_VAZIO = { clientes: [], classificacoes: {}, ignoradas: [] };
 
 export const carregarCaixa = () => carregar("caixa:v1", CAIXA_VAZIO);

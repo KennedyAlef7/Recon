@@ -13,15 +13,20 @@ function provisaoPorFornecedor(fornecedor, mes, ajustes) {
 // Receita e despesa mensal consolidadas (mesma convenção usada em todo o app):
 // receita = créditos de contas operacionais (exclui caixinha) que não foram marcados "Ignorar" na classificação por cliente;
 // despesa principal = provisão líquida dos fornecedores cadastrados no Financeiro (por categoria);
-// débitos do extrato entram só como conferência/diferença, não como despesa principal.
-export function calcularResultadoMensal(caixaData, financeiroData, ignoradas) {
+// débitos do extrato entram só como conferência/diferença (exclui os marcados "Ignorar" em Ver débitos —
+// ex: aplicações na caixinha, que são movimento interno, não despesa real).
+export function calcularResultadoMensal(caixaData, financeiroData, ignoradas, debitosIgnorados = new Set()) {
   const receitaPorMes = {};
   const despesaExtratoPorMes = {};
   caixaData.transacoes.forEach((t) => {
     if (t.conta === "nubank_caixinha") return;
-    if (ignoradas.has(t.id)) return;
-    if (t.tipo === "credito") receitaPorMes[t.mes] = (receitaPorMes[t.mes] || 0) + t.valor;
-    else despesaExtratoPorMes[t.mes] = (despesaExtratoPorMes[t.mes] || 0) + t.valor;
+    if (t.tipo === "credito") {
+      if (ignoradas.has(t.id)) return;
+      receitaPorMes[t.mes] = (receitaPorMes[t.mes] || 0) + t.valor;
+    } else {
+      if (debitosIgnorados.has(t.id)) return;
+      despesaExtratoPorMes[t.mes] = (despesaExtratoPorMes[t.mes] || 0) + t.valor;
+    }
   });
 
   const meses = [...new Set([...Object.keys(receitaPorMes), ...Object.keys(despesaExtratoPorMes)])].sort();
