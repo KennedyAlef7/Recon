@@ -5,7 +5,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from "recharts";
 import { carregarCaixa, carregarFinanceiro, carregarClientes } from "./lib/caixaStore.js";
-import { calcularResultadoMensal, SEM_CATEGORIA } from "./lib/resultado.js";
+import { calcularResultadoMensal, agruparPorTrimestre, SEM_CATEGORIA } from "./lib/resultado.js";
 
 const C = {
   bg: "#F4F6F5",
@@ -35,9 +35,19 @@ const fmtMes = (ym) => {
   return `${MESES_LABEL[parseInt(m, 10) - 1]}/${y}`;
 };
 
-function exportarExcel(dados, categoriasUnicas) {
-  const resultadoMensal = dados.map((d) => ({
-    Mês: fmtMes(d.mes),
+// Formata tanto chave de mês ("2026-06") quanto de trimestre ("2026-Q2")
+const fmtPeriodo = (chave) => {
+  if (!chave || chave === "total") return "Total do período";
+  if (chave.includes("-Q")) {
+    const [y, q] = chave.split("-Q");
+    return `${q}º Tri/${y}`;
+  }
+  return fmtMes(chave);
+};
+
+function exportarExcel(dados, categoriasUnicas, granularidade) {
+  const resultado = dados.map((d) => ({
+    Período: fmtPeriodo(d.mes),
     Receita: d.receita,
     Despesa: d.despesaFinanceiro,
     "Margem líquida": d.margem,
@@ -49,12 +59,12 @@ function exportarExcel(dados, categoriasUnicas) {
   dados.forEach((d) => {
     categoriasUnicas.forEach((cat) => {
       const valor = d.porCategoria[cat] || 0;
-      if (valor) porCategoria.push({ Mês: fmtMes(d.mes), Categoria: cat, Valor: valor });
+      if (valor) porCategoria.push({ Período: fmtPeriodo(d.mes), Categoria: cat, Valor: valor });
     });
   });
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultadoMensal), "Resultado Mensal");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resultado), granularidade === "trimestral" ? "Resultado Trimestral" : "Resultado Mensal");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(porCategoria), "Despesas por Categoria");
   XLSX.writeFile(wb, `resultados_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
@@ -65,6 +75,7 @@ export default function Resultados() {
   const [ignoradas, setIgnoradas] = useState(new Set());
   const [loaded, setLoaded] = useState(false);
   const [mesSel, setMesSel] = useState("total");
+  const [granularidade, setGranularidade] = useState("mensal");
 
   useEffect(() => {
     (async () => {
@@ -81,42 +92,52 @@ export default function Resultados() {
     [caixaData, financeiroData, ignoradas]
   );
 
+  const dadosExibidos = useMemo(
+    () => granularidade === "trimestral" ? agruparPorTrimestre(dados) : dados,
+    [dados, granularidade]
+  );
+
   // Ordem estável das categorias (não depende de ranking/valor) — cor sempre segue a categoria, nunca a posição
   const categoriasUnicas = useMemo(() => {
     const nomes = new Set();
-    dados.forEach((d) => Object.keys(d.porCategoria).forEach((c) => nomes.add(c)));
+    dadosExibidos.forEach((d) => Object.keys(d.porCategoria).forEach((c) => nomes.add(c)));
     return [...nomes].sort();
-  }, [dados]);
+  }, [dadosExibidos]);
   const corPorCategoria = (cat) => cat === SEM_CATEGORIA ? COR_SEM_CATEGORIA : PALETA_CATEGORIAS[categoriasUnicas.indexOf(cat) % PALETA_CATEGORIAS.length];
 
-  const chartData = useMemo(() => dados.map((d) => {
+  const chartData = useMemo(() => dadosExibidos.map((d) => {
     const linha = { mes: d.mes, receita: d.receita };
     categoriasUnicas.forEach((cat) => { linha[cat] = d.porCategoria[cat] || 0; });
     return linha;
-  }), [dados, categoriasUnicas]);
+  }), [dadosExibidos, categoriasUnicas]);
 
   const resumo = useMemo(() => {
     if (mesSel === "total") {
-      const receita = dados.reduce((s, d) => s + d.receita, 0);
-      const despesa = dados.reduce((s, d) => s + d.despesaFinanceiro, 0);
+      const receita = dadosExibidos.reduce((s, d) => s + d.receita, 0);
+      const despesa = dadosExibidos.reduce((s, d) => s + d.despesaFinanceiro, 0);
       const margem = receita - despesa;
-      return { receita, despesa, margem, margemPct: receita > 0 ? (margem / receita) * 100 : 0, diferenca: dados.reduce((s, d) => s + d.diferenca, 0) };
+      return { receita, despesa, margem, margemPct: receita > 0 ? (margem / receita) * 100 : 0, diferenca: dadosExibidos.reduce((s, d) => s + d.diferenca, 0) };
     }
-    const d = dados.find((x) => x.mes === mesSel);
+    const d = dadosExibidos.find((x) => x.mes === mesSel);
     return d
       ? { receita: d.receita, despesa: d.despesaFinanceiro, margem: d.margem, margemPct: d.margemPct, diferenca: d.diferenca }
       : { receita: 0, despesa: 0, margem: 0, margemPct: 0, diferenca: 0 };
-  }, [dados, mesSel]);
+  }, [dadosExibidos, mesSel]);
 
   const rankingCategorias = useMemo(() => {
-    const linhas = mesSel === "total" ? dados : dados.filter((d) => d.mes === mesSel);
+    const linhas = mesSel === "total" ? dadosExibidos : dadosExibidos.filter((d) => d.mes === mesSel);
     const totais = {};
     linhas.forEach((d) => Object.entries(d.porCategoria).forEach(([cat, v]) => { totais[cat] = (totais[cat] || 0) + v; }));
     const despesaTotal = Object.values(totais).reduce((s, v) => s + v, 0);
     return Object.entries(totais)
       .map(([categoria, valor]) => ({ categoria, valor, pct: despesaTotal > 0 ? (valor / despesaTotal) * 100 : 0 }))
       .sort((a, b) => b.valor - a.valor);
-  }, [dados, mesSel]);
+  }, [dadosExibidos, mesSel]);
+
+  function trocarGranularidade(g) {
+    setGranularidade(g);
+    setMesSel("total"); // chaves de mês e de trimestre não coincidem — evita ficar com um período inexistente selecionado
+  }
 
   return (
     <div className="min-h-screen" style={{ background: C.bg, color: C.ink, fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
@@ -127,7 +148,7 @@ export default function Resultados() {
             <h1 className="text-2xl font-bold mt-0.5">Receita x despesa por categoria e margem líquida</h1>
           </div>
           <button
-            onClick={() => exportarExcel(dados, categoriasUnicas)}
+            onClick={() => exportarExcel(dadosExibidos, categoriasUnicas, granularidade)}
             disabled={!dados.length}
             className="text-xs font-bold px-3 py-1.5 rounded-lg disabled:opacity-40"
             style={{ color: C.green, background: C.greenSoft }}
@@ -144,12 +165,29 @@ export default function Resultados() {
           </div>
         ) : (
           <>
-            <div className="mt-4">
-              <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Período</label>
-              <select className="text-sm rounded-lg px-3 py-1.5" style={{ border: `1px solid ${C.line}`, minWidth: 180 }} value={mesSel} onChange={(e) => setMesSel(e.target.value)}>
-                <option value="total">Total do período</option>
-                {dados.map((d) => <option key={d.mes} value={d.mes}>{fmtMes(d.mes)}</option>)}
-              </select>
+            <div className="flex flex-wrap items-end gap-4 mt-4">
+              <div>
+                <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Apuração</label>
+                <div className="flex gap-1">
+                  {[["mensal", "Mensal"], ["trimestral", "Trimestral"]].map(([g, label]) => (
+                    <button
+                      key={g}
+                      onClick={() => trocarGranularidade(g)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold"
+                      style={granularidade === g ? { background: C.amber, color: "#fff" } : { background: C.card, color: C.inkSoft, border: `1px solid ${C.line}` }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Período</label>
+                <select className="text-sm rounded-lg px-3 py-1.5" style={{ border: `1px solid ${C.line}`, minWidth: 180 }} value={mesSel} onChange={(e) => setMesSel(e.target.value)}>
+                  <option value="total">Total do período</option>
+                  {dadosExibidos.map((d) => <option key={d.mes} value={d.mes}>{fmtPeriodo(d.mes)}</option>)}
+                </select>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
@@ -176,9 +214,9 @@ export default function Resultados() {
               <ResponsiveContainer width="100%" height={320}>
                 <ComposedChart data={chartData} margin={{ top: 8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
-                  <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
+                  <XAxis dataKey="mes" tickFormatter={fmtPeriodo} fontSize={12} />
                   <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
-                  <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
+                  <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtPeriodo} />
                   <Legend verticalAlign="top" height={36} wrapperStyle={{ fontSize: 12 }} />
                   {categoriasUnicas.map((cat) => (
                     <Bar key={cat} dataKey={cat} name={cat} stackId="despesa" fill={corPorCategoria(cat)} stroke={C.card} strokeWidth={2} />
@@ -189,13 +227,15 @@ export default function Resultados() {
             </div>
 
             <div className="mt-8">
-              <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Margem líquida mensal (%)</div>
+              <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>
+                Margem líquida {granularidade === "trimestral" ? "trimestral" : "mensal"} (%)
+              </div>
               <ResponsiveContainer width="100%" height={220}>
-                <LineChart data={dados} margin={{ top: 8 }}>
+                <LineChart data={dadosExibidos} margin={{ top: 8 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={C.line} vertical={false} />
-                  <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
+                  <XAxis dataKey="mes" tickFormatter={fmtPeriodo} fontSize={12} />
                   <YAxis tickFormatter={(v) => `${v.toFixed(0)}%`} fontSize={11} width={50} />
-                  <Tooltip formatter={(v) => fmtPct(v)} labelFormatter={fmtMes} />
+                  <Tooltip formatter={(v) => fmtPct(v)} labelFormatter={fmtPeriodo} />
                   <Line type="monotone" dataKey="margemPct" name="Margem líquida %" stroke={C.blue} strokeWidth={2.5} dot />
                 </LineChart>
               </ResponsiveContainer>
@@ -203,7 +243,7 @@ export default function Resultados() {
 
             <div className="mt-8">
               <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>
-                Maiores ofensores {mesSel !== "total" && `— ${fmtMes(mesSel)}`}
+                Maiores ofensores {mesSel !== "total" && `— ${fmtPeriodo(mesSel)}`}
               </div>
               {rankingCategorias.length === 0 ? (
                 <div className="text-sm py-6 text-center rounded-lg" style={{ color: C.inkSoft, background: C.card, border: `1px solid ${C.line}` }}>

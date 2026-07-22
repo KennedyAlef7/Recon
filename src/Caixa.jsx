@@ -233,43 +233,50 @@ function ImportarTab({ caixaData, setCaixaData }) {
 }
 
 // ---------- Evolução ----------
-function EvolucaoTab({ caixaData }) {
-  const semCaixinha = useMemo(() => evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank"]), [caixaData]);
-  const comCaixinha = useMemo(() => evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank", "nubank_caixinha"]), [caixaData]);
+const CONTAS_PATRIMONIO = ["itau", "nubank", "nubank_caixinha", "c6_ka2"];
 
-  if (!semCaixinha.length) {
-    return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Importe extratos na aba "Importar" para ver a evolução de caixa.</div>;
+function EvolucaoTab({ caixaData }) {
+  const patrimonio = useMemo(() => evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, CONTAS_PATRIMONIO), [caixaData]);
+
+  if (!patrimonio.length) {
+    return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Importe extratos na aba "Importar" para ver a evolução do patrimônio.</div>;
   }
 
+  const ultimo = patrimonio[patrimonio.length - 1];
+  const anterior = patrimonio.length > 1 ? patrimonio[patrimonio.length - 2] : null;
+  const variacao = anterior ? ultimo.total - anterior.total : null;
+
   return (
-    <div className="space-y-8">
-      <div>
-        <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Evolução do saldo em caixa (Itaú + Nubank)</div>
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={semCaixinha}>
-            <CartesianGrid strokeDasharray="3 3" stroke={C.line} />
-            <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
-            <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
-            <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
-            <Legend />
-            <Line type="monotone" dataKey="itau" name="Itaú" stroke={CONTA_COR.itau} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="nubank" name="Nubank" stroke={CONTA_COR.nubank} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="total" name="Total" stroke={C.ink} strokeWidth={2.5} dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="rounded-xl p-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+          <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>Patrimônio total atual (Itaú + Nubank + Caixinha + KA2)</div>
+          <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color: C.ink }}>{fmtBRL(ultimo.total)}</div>
+        </div>
+        {variacao !== null && (
+          <div className="rounded-xl p-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+            <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: C.inkSoft }}>Variação vs. mês anterior</div>
+            <div className="text-lg font-bold font-mono tabular-nums mt-1" style={{ color: variacao >= 0 ? C.green : C.red }}>
+              {variacao >= 0 ? "+" : ""}{fmtBRL(variacao)}
+            </div>
+          </div>
+        )}
       </div>
 
       <div>
-        <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Evolução considerando a caixinha (liquidez total)</div>
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={comCaixinha}>
+        <div className="font-bold text-sm mb-2" style={{ color: C.ink }}>Evolução do patrimônio total</div>
+        <ResponsiveContainer width="100%" height={320}>
+          <LineChart data={patrimonio}>
             <CartesianGrid strokeDasharray="3 3" stroke={C.line} />
             <XAxis dataKey="mes" tickFormatter={fmtMes} fontSize={12} />
             <YAxis tickFormatter={(v) => fmtBRL(v)} fontSize={11} width={90} />
             <Tooltip formatter={(v) => fmtBRL(v)} labelFormatter={fmtMes} />
             <Legend />
-            <Line type="monotone" dataKey="nubank_caixinha" name="Caixinha" stroke={CONTA_COR.nubank_caixinha} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="total" name="Total (com caixinha)" stroke={C.ink} strokeWidth={2.5} dot={false} />
+            <Line type="monotone" dataKey="itau" name="Itaú" stroke={CONTA_COR.itau} strokeWidth={1.5} strokeOpacity={0.6} dot={false} />
+            <Line type="monotone" dataKey="nubank" name="Nubank" stroke={CONTA_COR.nubank} strokeWidth={1.5} strokeOpacity={0.6} dot={false} />
+            <Line type="monotone" dataKey="nubank_caixinha" name="Caixinha" stroke={CONTA_COR.nubank_caixinha} strokeWidth={1.5} strokeOpacity={0.6} dot={false} />
+            <Line type="monotone" dataKey="c6_ka2" name="C6 (KA2)" stroke={CONTA_COR.c6_ka2} strokeWidth={1.5} strokeOpacity={0.6} dot={false} />
+            <Line type="monotone" dataKey="total" name="Total (patrimônio)" stroke={C.ink} strokeWidth={3} dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -277,8 +284,17 @@ function EvolucaoTab({ caixaData }) {
   );
 }
 
+// Débitos do extrato do mês (fora da caixinha) — usado para conciliar a "diferença" vs. o Financeiro
+function debitosDoMes(caixaData, mes) {
+  return caixaData.transacoes
+    .filter((t) => t.mes === mes && t.tipo === "debito" && t.conta !== "nubank_caixinha")
+    .slice()
+    .sort((a, b) => b.valor - a.valor);
+}
+
 function MargemTab({ caixaData, financeiroData, ignoradas }) {
   const dados = useMemo(() => calcularResultadoMensal(caixaData, financeiroData, ignoradas), [caixaData, financeiroData, ignoradas]);
+  const [mesExpandido, setMesExpandido] = useState(null);
 
   if (!dados.length) {
     return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Importe extratos para calcular a margem líquida mensal.</div>;
@@ -304,42 +320,78 @@ function MargemTab({ caixaData, financeiroData, ignoradas }) {
         <table className="w-full text-sm">
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.line}` }}>
-              {["Mês", "Receita", "Despesa (Financeiro)", "Margem líquida", "Margem %", "Débitos extrato (conferência)", "Diferença"].map((h) => (
+              {["Mês", "Receita", "Despesa (Financeiro)", "Margem líquida", "Margem %", "Débitos extrato (conferência)", "Diferença", ""].map((h) => (
                 <th key={h} className="px-3 py-2 text-xs font-semibold uppercase text-right first:text-left" style={{ color: C.inkSoft }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {dados.map((d) => (
-              <tr key={d.mes} style={{ borderBottom: `1px solid ${C.line}` }}>
-                <td className="px-3 py-2 font-mono">{fmtMes(d.mes)}</td>
-                <td className="px-3 py-2 text-right font-mono" style={{ color: C.green }}>{fmtBRL(d.receita)}</td>
-                <td className="px-3 py-2 text-right font-mono" style={{ color: C.amber }}>{fmtBRL(d.despesaFinanceiro)}</td>
-                <td className="px-3 py-2 text-right font-mono font-bold" style={{ color: d.margem >= 0 ? C.green : C.red }}>{fmtBRL(d.margem)}</td>
-                <td className="px-3 py-2 text-right font-mono">{fmtPct(d.margemPct)}</td>
-                <td className="px-3 py-2 text-right font-mono" style={{ color: C.inkSoft }}>{fmtBRL(d.despesaExtrato)}</td>
-                <td className="px-3 py-2 text-right font-mono" style={{ color: Math.abs(d.diferenca) < 0.01 ? C.inkSoft : C.blue }}>{fmtBRL(d.diferenca)}</td>
-              </tr>
-            ))}
+            {dados.map((d) => {
+              const expandido = mesExpandido === d.mes;
+              const debitos = expandido ? debitosDoMes(caixaData, d.mes) : [];
+              return (
+                <React.Fragment key={d.mes}>
+                  <tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                    <td className="px-3 py-2 font-mono">{fmtMes(d.mes)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: C.green }}>{fmtBRL(d.receita)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: C.amber }}>{fmtBRL(d.despesaFinanceiro)}</td>
+                    <td className="px-3 py-2 text-right font-mono font-bold" style={{ color: d.margem >= 0 ? C.green : C.red }}>{fmtBRL(d.margem)}</td>
+                    <td className="px-3 py-2 text-right font-mono">{fmtPct(d.margemPct)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: C.inkSoft }}>{fmtBRL(d.despesaExtrato)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: Math.abs(d.diferenca) < 0.01 ? C.inkSoft : C.blue }}>{fmtBRL(d.diferenca)}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        onClick={() => setMesExpandido(expandido ? null : d.mes)}
+                        className="text-xs font-bold px-2 py-1 rounded-lg"
+                        style={{ color: C.blue, background: C.blueSoft }}
+                      >
+                        {expandido ? "Ocultar" : "Ver débitos"}
+                      </button>
+                    </td>
+                  </tr>
+                  {expandido && (
+                    <tr>
+                      <td colSpan={8} className="px-3 pb-3" style={{ background: C.bg }}>
+                        {debitos.length === 0 ? (
+                          <div className="text-xs py-3 text-center" style={{ color: C.inkSoft }}>Nenhum débito neste mês.</div>
+                        ) : (
+                          <div className="rounded-lg overflow-hidden mt-2" style={{ border: `1px solid ${C.line}` }}>
+                            {debitos.map((t, idx) => (
+                              <div key={t.id} className="flex items-center gap-3 px-3 py-2 text-xs" style={{ background: C.card, borderTop: idx ? `1px solid ${C.line}` : "none" }}>
+                                <span className="px-2 py-0.5 rounded-full font-bold" style={{ background: `${CONTA_COR[t.conta]}22`, color: CONTA_COR[t.conta] }}>
+                                  {CONTA_LABEL[t.conta]}
+                                </span>
+                                <span style={{ color: C.inkSoft, width: 60 }}>{t.data?.split("-").reverse().join("/")}</span>
+                                <span className="flex-1 truncate">{t.descricao}</span>
+                                <span className="font-mono font-bold" style={{ color: C.red }}>{fmtBRL(t.valor)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
+      </div>
+      <div className="text-xs" style={{ color: C.inkSoft }}>
+        "Ver débitos" mostra todos os débitos do extrato (Itaú, Nubank e C6/KA2) daquele mês, do maior para o menor — use para achar o que ainda falta cadastrar como fornecedor no Financeiro.
       </div>
     </div>
   );
 }
 
 function exportarExcel(caixaData, financeiroData, ignoradas) {
-  const semCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank"]);
-  const comCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank", "nubank_caixinha"]);
+  const patrimonio = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, CONTAS_PATRIMONIO);
   const margem = calcularResultadoMensal(caixaData, financeiroData, ignoradas);
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(semCaixinha.map((l) => ({
-    Mês: fmtMes(l.mes), Itaú: l.itau, Nubank: l.nubank, Total: l.total,
-  }))), "Evolução de Caixa");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(comCaixinha.map((l) => ({
-    Mês: fmtMes(l.mes), Itaú: l.itau, Nubank: l.nubank, Caixinha: l.nubank_caixinha, Total: l.total,
-  }))), "Evolução com Caixinha");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(patrimonio.map((l) => ({
+    Mês: fmtMes(l.mes), Itaú: l.itau, Nubank: l.nubank, Caixinha: l.nubank_caixinha, "C6 (KA2)": l.c6_ka2, Total: l.total,
+  }))), "Evolução do Patrimônio");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(margem.map((m) => ({
     Mês: fmtMes(m.mes), Receita: m.receita, "Despesa (Financeiro)": m.despesaFinanceiro,
     "Margem líquida": m.margem, "Margem %": m.margemPct.toFixed(1), "Débitos extrato": m.despesaExtrato, Diferença: m.diferenca,
@@ -366,7 +418,7 @@ export default function Caixa() {
 
   const totalTransacoes = caixaData.transacoes.length;
   const saldoAtualTotal = useMemo(() => {
-    const mensal = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank", "nubank_caixinha"]);
+    const mensal = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, CONTAS_PATRIMONIO);
     return mensal.length ? mensal[mensal.length - 1].total : 0;
   }, [caixaData]);
 
