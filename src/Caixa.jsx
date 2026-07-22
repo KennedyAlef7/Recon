@@ -6,6 +6,7 @@ import {
 } from "recharts";
 import { parseExtrato, CONTAS } from "./lib/extratoParser.js";
 import { carregarCaixa, salvarCaixa, carregarClientes, carregarFinanceiro } from "./lib/caixaStore.js";
+import { calcularResultadoMensal } from "./lib/resultado.js";
 
 const C = {
   bg: "#F4F6F5",
@@ -276,38 +277,8 @@ function EvolucaoTab({ caixaData }) {
   );
 }
 
-// ---------- Margem líquida ----------
-function calcularMargem(caixaData, financeiroData, ignoradas) {
-  const receitaPorMes = {};
-  const despesaExtratoPorMes = {};
-  caixaData.transacoes.forEach((t) => {
-    if (t.conta === "nubank_caixinha") return; // movimentos internos da caixinha não são receita/despesa
-    if (ignoradas.has(t.id)) return; // marcado como não-receita na classificação por cliente (ex: transferência entre contas do grupo)
-    if (t.tipo === "credito") receitaPorMes[t.mes] = (receitaPorMes[t.mes] || 0) + t.valor;
-    else despesaExtratoPorMes[t.mes] = (despesaExtratoPorMes[t.mes] || 0) + t.valor;
-  });
-
-  const provisaoPorFornecedor = (fornecedor, mes) => {
-    const totalDescontos = fornecedor.descontos.reduce((s, d) => s + d.valor, 0);
-    const ajustesMes = financeiroData.ajustes.filter((a) => a.fornecedorId === fornecedor.id && a.mes === mes);
-    const totalDescPontuais = ajustesMes.filter((a) => a.tipo === "desconto").reduce((s, a) => s + a.valor, 0);
-    const totalAbonos = ajustesMes.filter((a) => a.tipo === "abono").reduce((s, a) => s + a.valor, 0);
-    return Math.max(0, fornecedor.valorBruto - totalDescontos - totalDescPontuais + totalAbonos);
-  };
-
-  const meses = [...new Set([...Object.keys(receitaPorMes), ...Object.keys(despesaExtratoPorMes)])].sort();
-  return meses.map((mes) => {
-    const receita = receitaPorMes[mes] || 0;
-    const despesaFinanceiro = financeiroData.fornecedores.reduce((s, f) => s + provisaoPorFornecedor(f, mes), 0);
-    const despesaExtrato = despesaExtratoPorMes[mes] || 0;
-    const margem = receita - despesaFinanceiro;
-    const margemPct = receita > 0 ? (margem / receita) * 100 : 0;
-    return { mes, receita, despesaFinanceiro, despesaExtrato, margem, margemPct, diferenca: despesaExtrato - despesaFinanceiro };
-  });
-}
-
 function MargemTab({ caixaData, financeiroData, ignoradas }) {
-  const dados = useMemo(() => calcularMargem(caixaData, financeiroData, ignoradas), [caixaData, financeiroData, ignoradas]);
+  const dados = useMemo(() => calcularResultadoMensal(caixaData, financeiroData, ignoradas), [caixaData, financeiroData, ignoradas]);
 
   if (!dados.length) {
     return <div className="text-sm py-12 text-center" style={{ color: C.inkSoft }}>Importe extratos para calcular a margem líquida mensal.</div>;
@@ -360,7 +331,7 @@ function MargemTab({ caixaData, financeiroData, ignoradas }) {
 function exportarExcel(caixaData, financeiroData, ignoradas) {
   const semCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank"]);
   const comCaixinha = evolucaoMensal(caixaData.transacoes, caixaData.saldosConhecidos, ["itau", "nubank", "nubank_caixinha"]);
-  const margem = calcularMargem(caixaData, financeiroData, ignoradas);
+  const margem = calcularResultadoMensal(caixaData, financeiroData, ignoradas);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(semCaixinha.map((l) => ({

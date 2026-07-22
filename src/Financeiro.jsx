@@ -63,6 +63,13 @@ const parseValorInput = (s) => {
 const norm = (s) =>
   (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toUpperCase().replace(/[^A-Z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 
+// Sugestões de categoria — ajudam a manter nomes consistentes para a análise no módulo Resultados,
+// mas o campo continua livre (o usuário pode digitar qualquer outra categoria).
+const CATEGORIAS_SUGERIDAS = [
+  "Sócios / Pró-labore", "Impostos", "Convênio / Benefícios", "Folha de pagamento",
+  "Contabilidade", "Aluguel", "Software / Tecnologia", "Bancário / Tarifas", "Marketing", "Outros",
+];
+
 // ---------- Formulário de Fornecedor ----------
 function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
   const [nome, setNome] = useState(inicial?.nome || "");
@@ -232,8 +239,12 @@ function FormFornecedor({ inicial, onSalvar, onCancelar, sugestoes = [] }) {
             style={{ border: `1px solid ${C.line}`, background: "#fff" }}
             value={categoria}
             onChange={(e) => setCategoria(e.target.value)}
-            placeholder="Ex: Software, Aluguel, Folha, Contabilidade…"
+            placeholder="Ex: Sócios, Impostos, Convênio…"
+            list="categorias-fornecedor"
           />
+          <datalist id="categorias-fornecedor">
+            {CATEGORIAS_SUGERIDAS.map((c) => <option key={c} value={c} />)}
+          </datalist>
         </div>
         <div>
           <label className="block text-xs font-semibold mb-1" style={{ color: C.inkSoft }}>Valor bruto mensal (R$)</label>
